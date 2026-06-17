@@ -161,6 +161,7 @@
     },
     "safety": {
         "stale_order_poller_interval_sec": 3.0,
+        "reconciler_slow_interval_sec": 15.0,
         "stale_order_debounce_count": 2,
         "max_consecutive_order_rejections": 5,
         "circuit_breaker_cooldown_sec": 60.0,

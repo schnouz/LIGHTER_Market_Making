@@ -1008,6 +1008,52 @@ class TestCollectOrderOperations(unittest.TestCase):
             self.assertEqual(ops[0].action, "cancel")
             self.assertEqual(ops[0].exchange_id, 420)
 
+    def test_reconcile_cancels_remote_surplus_risk_orders_over_exposure_cap(self):
+        """Remote snapshots should cancel surplus risk-adding orders even if local levels lag."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            current_mid_price_cached=100.0,
+            current_position_size=-0.70,
+            precomputed_max_pos_usd=150.0,
+            RISK_ORDER_EXPOSURE_CAP_ENABLED=True,
+            RISK_ORDER_EXPOSURE_BUFFER=0.90,
+        ):
+            mm.state.orders.ask_order_ids[0] = 10
+            mm.state.orders.ask_prices[0] = 101.0
+            mm.state.orders.ask_sizes[0] = 0.60
+            mm.state.orders.ask_reduce_only[0] = False
+            mm.state.orders.ask_order_ids[1] = 20
+            mm.state.orders.ask_prices[1] = 102.0
+            mm.state.orders.ask_sizes[1] = 0.60
+            mm.state.orders.ask_reduce_only[1] = False
+            remote_orders = [
+                {
+                    "client_order_index": 10,
+                    "order_index": 1001,
+                    "is_ask": True,
+                    "remaining_base_amount": "0.60",
+                    "price": "101.0",
+                    "reduce_only": False,
+                    "status": "open",
+                },
+                {
+                    "client_order_index": 20,
+                    "order_index": 1002,
+                    "is_ask": True,
+                    "remaining_base_amount": "0.60",
+                    "price": "102.0",
+                    "reduce_only": False,
+                    "status": "open",
+                },
+            ]
+
+            ok, cancel_ids = mm._reconcile_local_orders_with_remote_orders(remote_orders, source="test")
+
+            self.assertFalse(ok)
+            self.assertEqual(cancel_ids, {1002})
+
     def test_collect_holds_young_aggressive_reprice(self):
         """Young risk-adding orders keep queue priority unless the reprice is materially better."""
         with temp_mm_attrs(

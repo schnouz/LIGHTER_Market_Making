@@ -638,7 +638,9 @@ _WS_AUTH_TOKEN_TTL = int(os.getenv(
 _account_orders_ws_ready = False
 _account_orders_ws_connected = asyncio.Event()
 _reconcile_pending_event = asyncio.Event()
-RECONCILER_SLOW_INTERVAL_SEC = 60.0
+RECONCILER_SLOW_INTERVAL_SEC = float(os.getenv(
+    "RECONCILER_SLOW_INTERVAL_SEC",
+    _safety.get("reconciler_slow_interval_sec", 60.0)))
 
 # WS-based cancel confirmation: order_id -> asyncio.Event
 _order_cancel_events: dict[int, asyncio.Event] = {}
@@ -2377,6 +2379,50 @@ def _risk_order_exposure_cap(
     return projected_usd > cap_usd + EPSILON, projected_usd, cap_usd
 
 
+def _remote_risk_order_cancel_ids_over_cap(remote_orders: list[dict]) -> set[int]:
+    """Choose surplus remote risk-adding orders to cancel when exchange exposure exceeds cap."""
+    if not RISK_ORDER_EXPOSURE_CAP_ENABLED:
+        return set()
+    mid_price = state.market.mid_price
+    max_pos_usd = state.account.precomputed_max_pos_usd
+    if mid_price is None or mid_price <= 0 or max_pos_usd <= 0:
+        return set()
+    cap_usd = max_pos_usd * max(0.0, min(RISK_ORDER_EXPOSURE_BUFFER, 1.0))
+    side_orders: dict[str, list[tuple[float, int, float]]] = {"buy": [], "sell": []}
+
+    for order in remote_orders:
+        is_ask = _extract_order_is_ask(order)
+        if is_ask is None:
+            continue
+        if bool(_extract_order_reduce_only(order)):
+            continue
+        size = _extract_order_size(order)
+        exchange_id = _extract_order_index(order)
+        if size is None or size <= 0 or exchange_id is None:
+            continue
+        price = _extract_order_price(order) or mid_price
+        side = "sell" if is_ask else "buy"
+        distance = abs(price - mid_price)
+        side_orders[side].append((distance, exchange_id, size * mid_price))
+
+    cancel_ids: set[int] = set()
+    base_exposures = {
+        "buy": max(state.account.position_size, 0.0) * mid_price,
+        "sell": max(-state.account.position_size, 0.0) * mid_price,
+    }
+    for side, candidates in side_orders.items():
+        total_usd = base_exposures[side] + sum(item[2] for item in candidates)
+        if total_usd <= cap_usd + EPSILON:
+            continue
+        # Keep the most useful/nearer quote first; cancel farthest surplus orders.
+        for _distance, exchange_id, exposure_usd in sorted(candidates, reverse=True):
+            cancel_ids.add(exchange_id)
+            total_usd -= exposure_usd
+            if total_usd <= cap_usd + EPSILON:
+                break
+    return cancel_ids
+
+
 def _sync_tracked_order_from_remote(side: str, level: int, order: dict) -> None:
     """Enqueue a BIND_LIVE event to refresh a tracked order from exchange data."""
     cid = _extract_client_order_index(order)
@@ -2562,6 +2608,11 @@ def _reconcile_local_orders_with_remote_orders(
     }
     if unknown_exchange_ids:
         mismatch_reasons.append(f"unknown_live_ids:{sorted(unknown_exchange_ids)}")
+
+    surplus_risk_exchange_ids = _remote_risk_order_cancel_ids_over_cap(remote_orders)
+    if surplus_risk_exchange_ids:
+        unknown_exchange_ids.update(surplus_risk_exchange_ids)
+        mismatch_reasons.append(f"risk_exposure_surplus_ids:{sorted(surplus_risk_exchange_ids)}")
 
     live_count = len(live_client_ids)
     if MAX_LIVE_ORDERS_PER_MARKET > 0 and live_count > MAX_LIVE_ORDERS_PER_MARKET:
