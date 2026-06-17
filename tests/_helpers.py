@@ -30,6 +30,7 @@ _STATE_MAP = {
     'available_capital':       lambda: (mm.state.account, 'available_capital'),
     'portfolio_value':         lambda: (mm.state.account, 'portfolio_value'),
     'current_position_size':   lambda: (mm.state.account, 'position_size'),
+    'precomputed_max_pos_usd': lambda: (mm.state.account, 'precomputed_max_pos_usd'),
     'account_positions':       lambda: (mm.state.account, 'positions'),
     'recent_trades':           lambda: (mm.state.account, 'recent_trades'),
     'vol_obi_calc':            lambda: (mm.state.vol_obi_state, 'calculator'),
@@ -84,6 +85,7 @@ def temp_mm_attrs(**overrides):
     mm._last_inventory_derisk_log = 0.0
     mm._last_toxic_flow_guard_log = 0.0
     mm._last_flat_quote_fallback_log = 0.0
+    mm._last_execution_quality_guard_log = 0.0
     # Save/restore local_order_book by replacing with a fresh empty book on teardown.
     # Cannot deepcopy because CBookSide (Cython) doesn't support __reduce__.
     saved_ob = mm.state.market.local_order_book
@@ -143,6 +145,7 @@ def temp_mm_attrs(**overrides):
         mm._last_inventory_derisk_log = 0.0
         mm._last_toxic_flow_guard_log = 0.0
         mm._last_flat_quote_fallback_log = 0.0
+        mm._last_execution_quality_guard_log = 0.0
         # Restore original if it was replaced, or reset to fresh empty book
         # if tests mutated the object in-place.
         if 'local_order_book' in overrides:

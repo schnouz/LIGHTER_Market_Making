@@ -5,7 +5,13 @@
         "levels_per_side": 2,
         "base_amount": 0.0002,
         "capital_usage_percent": 0.15,
-        "default_quote_update_threshold_bps": 25.0,
+        "default_quote_update_threshold_bps": 35.0,
+        "execution_quality": {
+            "min_order_lifetime_seconds": 6.0,
+            "min_reprice_improvement_bps": 4.0,
+            "risk_order_exposure_cap_enabled": true,
+            "risk_order_exposure_buffer": 0.92
+        },
         "spread_factor_level1": 2.0,
         "order_timeout_seconds": 30.0,
         "position_value_threshold_usd": 11.0,
@@ -21,10 +27,10 @@
             "adaptive_enabled": true,
             "adaptive_horizon_sec": 30,
             "adverse_threshold_bps": 2.0,
-            "spread_widen_per_adverse_bps": 0.05,
+            "spread_widen_per_adverse_bps": 0.08,
             "max_spread_multiplier": 1.5,
-            "size_reduce_per_adverse_bps": 0.06,
-            "min_size_multiplier": 0.55,
+            "size_reduce_per_adverse_bps": 0.08,
+            "min_size_multiplier": 0.45,
             "metrics_flush_seconds": 10
         },
         "research_logging": {
@@ -59,12 +65,12 @@
             "enabled": true,
             "observe_only": false,
             "min_samples": 12,
-            "adverse_threshold_bps": 3.0,
-            "severe_adverse_bps": 8.0,
+            "adverse_threshold_bps": 2.5,
+            "severe_adverse_bps": 7.0,
             "spread_capture_floor_bps": 0.5,
             "inventory_ratio_trigger": 0.25,
             "spread_widen_per_adverse_bps": 0.08,
-            "max_spread_multiplier": 1.8,
+            "max_spread_multiplier": 2.2,
             "suppress_risk_side": true
         },
         "quote_engine": "cartea_jaimungal",
@@ -135,7 +141,7 @@
     },
     "performance": {
         "min_loop_interval": 0.1,
-        "rate_limit_send_interval": 0.15,
+        "rate_limit_send_interval": 0.3,
         "quota_recovery": {
             "enabled": false,
             "trigger_threshold": 5,

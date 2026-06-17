@@ -941,6 +941,107 @@ class TestCollectOrderOperations(unittest.TestCase):
             self.assertEqual(mm.state.orders.bid_order_ids[0], 42)
             self.assertEqual(lc.status, mm.SideStatus.PLACING)
 
+    def test_collect_suppresses_risk_increasing_create_over_exposure_cap(self):
+        """Risk-adding creates are skipped when open-order exposure already uses the budget."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            current_mid_price_cached=100.0,
+            current_position_size=0.0,
+            precomputed_max_pos_usd=150.0,
+            RISK_ORDER_EXPOSURE_CAP_ENABLED=True,
+            RISK_ORDER_EXPOSURE_BUFFER=0.90,
+        ):
+            mm.state.orders.bid_order_ids[1] = 88
+            mm.state.orders.bid_prices[1] = 99.0
+            mm.state.orders.bid_sizes[1] = 1.0
+            mm.state.orders.bid_reduce_only[1] = False
+
+            ops = mm.collect_order_operations([(98.0, 102.0)], base_amount=1.0)
+
+            self.assertEqual(len(ops), 1)
+            self.assertEqual(ops[0].side, "sell")
+            self.assertEqual(ops[0].action, "create")
+
+    def test_collect_cancels_existing_risk_order_over_exposure_cap(self):
+        """Existing risk-adding orders are cancelled if position plus live orders exceed the cap."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            current_mid_price_cached=100.0,
+            current_position_size=1.0,
+            precomputed_max_pos_usd=150.0,
+            RISK_ORDER_EXPOSURE_CAP_ENABLED=True,
+            RISK_ORDER_EXPOSURE_BUFFER=0.90,
+        ):
+            mm.state.orders.bid_order_ids[0] = 42
+            mm.state.orders.bid_prices[0] = 99.0
+            mm.state.orders.bid_sizes[0] = 1.0
+            mm.state.orders.bid_reduce_only[0] = False
+            mm._client_to_exchange_id[42] = 420
+
+            ops = mm.collect_order_operations([(98.0, None)], base_amount=1.0)
+
+            self.assertEqual(len(ops), 1)
+            self.assertEqual(ops[0].side, "buy")
+            self.assertEqual(ops[0].action, "cancel")
+            self.assertEqual(ops[0].exchange_id, 420)
+
+    def test_collect_holds_young_aggressive_reprice(self):
+        """Young risk-adding orders keep queue priority unless the reprice is materially better."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            current_position_size=0.0,
+            QUOTE_UPDATE_THRESHOLD_BPS=10.0,
+            MIN_ORDER_LIFETIME_SECONDS=10.0,
+            MIN_REPRICE_IMPROVEMENT_BPS=40.0,
+        ):
+            mm.state.orders.bid_order_ids[0] = 42
+            mm.state.orders.bid_prices[0] = 100.0
+            mm.state.orders.bid_sizes[0] = 1.0
+            mm.state.orders.bid_reduce_only[0] = False
+            mm._client_to_exchange_id[42] = 420
+            lc = mm.order_manager.lifecycle("buy", 0)
+            lc.status = mm.SideStatus.LIVE
+            lc.updated_at = 100.0
+
+            with patch.object(mm.time, "monotonic", return_value=102.0):
+                ops = mm.collect_order_operations([(100.30, None)], base_amount=1.0)
+
+            self.assertEqual(ops, [])
+
+    def test_collect_allows_young_conservative_reprice(self):
+        """Conservative reprices are still immediate, even during the minimum lifetime window."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            current_position_size=0.0,
+            QUOTE_UPDATE_THRESHOLD_BPS=10.0,
+            MIN_ORDER_LIFETIME_SECONDS=10.0,
+            MIN_REPRICE_IMPROVEMENT_BPS=40.0,
+        ):
+            mm.state.orders.bid_order_ids[0] = 42
+            mm.state.orders.bid_prices[0] = 100.0
+            mm.state.orders.bid_sizes[0] = 1.0
+            mm.state.orders.bid_reduce_only[0] = False
+            mm._client_to_exchange_id[42] = 420
+            lc = mm.order_manager.lifecycle("buy", 0)
+            lc.status = mm.SideStatus.LIVE
+            lc.updated_at = 100.0
+
+            with patch.object(mm.time, "monotonic", return_value=102.0):
+                ops = mm.collect_order_operations([(99.70, None)], base_amount=1.0)
+
+            self.assertEqual(len(ops), 1)
+            self.assertEqual(ops[0].side, "buy")
+            self.assertEqual(ops[0].action, "modify")
+            self.assertAlmostEqual(ops[0].price, 99.70)
+
 
 class TestOrderLifecycleWatchdog(unittest.IsolatedAsyncioTestCase):
 

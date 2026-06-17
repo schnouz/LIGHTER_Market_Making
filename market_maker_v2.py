@@ -183,6 +183,20 @@ DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS = float(os.getenv(
     "DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS",
     _trading.get("default_quote_update_threshold_bps", 10.0)))
 QUOTE_UPDATE_THRESHOLD_BPS = DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS  # backward-compatible alias
+_execution_quality_cfg = _trading.get("execution_quality", {})
+MIN_ORDER_LIFETIME_SECONDS = float(os.getenv(
+    "MIN_ORDER_LIFETIME_SECONDS",
+    _execution_quality_cfg.get("min_order_lifetime_seconds", 0.0)))
+MIN_REPRICE_IMPROVEMENT_BPS = float(os.getenv(
+    "MIN_REPRICE_IMPROVEMENT_BPS",
+    _execution_quality_cfg.get("min_reprice_improvement_bps", 0.0)))
+RISK_ORDER_EXPOSURE_CAP_ENABLED = _env_bool(
+    "RISK_ORDER_EXPOSURE_CAP_ENABLED",
+    bool(_execution_quality_cfg.get("risk_order_exposure_cap_enabled", False)),
+)
+RISK_ORDER_EXPOSURE_BUFFER = float(os.getenv(
+    "RISK_ORDER_EXPOSURE_BUFFER",
+    _execution_quality_cfg.get("risk_order_exposure_buffer", 1.0)))
 SPREAD_FACTOR_LEVEL1 = float(os.getenv(
     "SPREAD_FACTOR_LEVEL1",
     _trading.get("spread_factor_level1", 2.0)))
@@ -739,6 +753,7 @@ _last_inventory_hysteresis_log = 0.0
 _last_inventory_derisk_log = 0.0
 _last_toxic_flow_guard_log = 0.0
 _last_flat_quote_fallback_log = 0.0
+_last_execution_quality_guard_log = 0.0
 
 
 def _enqueue_order_event(event: OrderEvent) -> None:
@@ -2254,6 +2269,93 @@ def _is_reducing_side(side: str, position_size: float) -> bool:
     return (position_size > EPSILON and side == "sell") or (
         position_size < -EPSILON and side == "buy"
     )
+
+
+def _price_move_is_more_conservative(side: str, existing_price: Optional[float], new_price: Optional[float]) -> bool:
+    if existing_price is None or new_price is None:
+        return False
+    if side == "buy":
+        return new_price < existing_price - EPSILON
+    return new_price > existing_price + EPSILON
+
+
+def _order_age_seconds(side: str, level: int) -> Optional[float]:
+    updated_at = order_manager.lifecycle(side, level).updated_at
+    if updated_at <= 0:
+        return None
+    return max(0.0, time.monotonic() - updated_at)
+
+
+def _should_hold_young_order(
+    *,
+    side: str,
+    level: int,
+    existing_price: Optional[float],
+    existing_size: Optional[float],
+    new_price: Optional[float],
+    new_size: Optional[float],
+    change_bps: float,
+    size_changed: bool,
+    effective_threshold: float,
+    reduce_only: bool,
+) -> bool:
+    if reduce_only or MIN_ORDER_LIFETIME_SECONDS <= 0:
+        return False
+    age = _order_age_seconds(side, level)
+    if age is None or age >= MIN_ORDER_LIFETIME_SECONDS:
+        return False
+    if _price_move_is_more_conservative(side, existing_price, new_price):
+        return False
+    if change_bps <= effective_threshold + max(MIN_REPRICE_IMPROVEMENT_BPS, 0.0):
+        return True
+    if not size_changed or existing_size is None or new_size is None:
+        return False
+    tolerance = state.config.amount_tick_float if state.config.amount_tick_float > 0 else EPSILON
+    # Keep young risk-adding orders stable; risk-reducing size updates remain immediate.
+    return new_size > existing_size + max(tolerance, EPSILON)
+
+
+def _risk_increasing_exposure_usd(side: str, *, exclude_level: int, candidate_size: float) -> Optional[float]:
+    mid_price = state.market.mid_price
+    if mid_price is None or mid_price <= 0:
+        return None
+    orders = state.orders
+    if side == "buy":
+        exposure_base = max(state.account.position_size, 0.0)
+        order_ids = orders.bid_order_ids
+        sizes = orders.bid_sizes
+        reduce_only_flags = orders.bid_reduce_only
+    else:
+        exposure_base = max(-state.account.position_size, 0.0)
+        order_ids = orders.ask_order_ids
+        sizes = orders.ask_sizes
+        reduce_only_flags = orders.ask_reduce_only
+
+    for level, order_id in enumerate(order_ids):
+        if level == exclude_level or order_id is None:
+            continue
+        reduce_only = bool(reduce_only_flags[level]) if reduce_only_flags[level] is not None else False
+        if reduce_only:
+            continue
+        size = sizes[level]
+        if size is not None and size > 0:
+            exposure_base += size
+    if candidate_size > 0:
+        exposure_base += candidate_size
+    return exposure_base * mid_price
+
+
+def _risk_order_exposure_cap(side: str, level: int, candidate_size: float) -> tuple[bool, Optional[float], Optional[float]]:
+    if not RISK_ORDER_EXPOSURE_CAP_ENABLED:
+        return False, None, None
+    max_pos_usd = state.account.precomputed_max_pos_usd
+    if max_pos_usd <= 0:
+        return False, None, None
+    cap_usd = max_pos_usd * max(0.0, min(RISK_ORDER_EXPOSURE_BUFFER, 1.0))
+    projected_usd = _risk_increasing_exposure_usd(side, exclude_level=level, candidate_size=candidate_size)
+    if projected_usd is None:
+        return False, None, cap_usd
+    return projected_usd > cap_usd + EPSILON, projected_usd, cap_usd
 
 
 def _sync_tracked_order_from_remote(side: str, level: int, order: dict) -> None:
@@ -4019,6 +4121,7 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
 
     Returns a list of BatchOp describing creates/modifies needed this iteration.
     """
+    global _last_execution_quality_guard_log
     ops = []
     orders = state.orders
     effective_threshold = _adaptive_threshold_bps()
@@ -4057,6 +4160,26 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                 existing_size = orders.ask_sizes[level]
                 existing_reduce_only = orders.ask_reduce_only[level]
 
+            if not reduce_only:
+                capped, projected_usd, cap_usd = _risk_order_exposure_cap(side, level, new_size)
+                if capped:
+                    now = time.monotonic()
+                    if now - _last_execution_quality_guard_log >= 60.0:
+                        logger.warning(
+                            "Execution quality guard suppressing %s[%d]: projected risk exposure %.2f > cap %.2f",
+                            side, level, projected_usd or 0.0, cap_usd or 0.0,
+                        )
+                        _last_execution_quality_guard_log = now
+                    if existing_id is not None:
+                        exchange_id = _resolve_exchange_id(existing_id)
+                        if exchange_id is not None:
+                            ops.append(BatchOp(
+                                side=side, level=level, action="cancel",
+                                price=0, size=0,
+                                order_id=existing_id, exchange_id=exchange_id,
+                            ))
+                    continue
+
             if existing_id is not None:
                 exchange_id = _resolve_exchange_id(existing_id)
                 if exchange_id is None:
@@ -4086,6 +4209,24 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                         logger.debug(
                             "Keeping %s[%d]: price %.2f bps <= %.2f and size unchanged",
                             side, level, change_bps, effective_threshold,
+                        )
+                    continue
+                if _should_hold_young_order(
+                    side=side,
+                    level=level,
+                    existing_price=existing_price,
+                    existing_size=existing_size,
+                    new_price=new_price,
+                    new_size=new_size,
+                    change_bps=change_bps,
+                    size_changed=size_changed,
+                    effective_threshold=effective_threshold,
+                    reduce_only=reduce_only,
+                ):
+                    if _log_debug:
+                        logger.debug(
+                            "Keeping %s[%d]: young order age %.2fs, change %.2f bps, threshold %.2f",
+                            side, level, _order_age_seconds(side, level) or 0.0, change_bps, effective_threshold,
                         )
                     continue
                 ops.append(BatchOp(
