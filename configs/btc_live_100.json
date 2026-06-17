@@ -65,13 +65,14 @@
             "enabled": true,
             "observe_only": false,
             "min_samples": 12,
-            "adverse_threshold_bps": 2.5,
+            "adverse_threshold_bps": 2.0,
             "severe_adverse_bps": 7.0,
             "spread_capture_floor_bps": 0.5,
             "inventory_ratio_trigger": 0.25,
             "spread_widen_per_adverse_bps": 0.08,
             "max_spread_multiplier": 2.2,
-            "suppress_risk_side": true
+            "suppress_risk_side": true,
+            "suppress_on_weak_spread_adverse": true
         },
         "quote_engine": "cartea_jaimungal",
         "cartea_jaimungal": {

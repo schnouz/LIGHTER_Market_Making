@@ -346,6 +346,9 @@ TOXIC_FLOW_GUARD_CONFIG = ToxicFlowGuardConfig(
     suppress_risk_side=_env_bool(
         "TOXIC_FLOW_SUPPRESS_RISK_SIDE",
         bool(_toxic_flow_cfg.get("suppress_risk_side", True))),
+    suppress_on_weak_spread_adverse=_env_bool(
+        "TOXIC_FLOW_SUPPRESS_ON_WEAK_SPREAD_ADVERSE",
+        bool(_toxic_flow_cfg.get("suppress_on_weak_spread_adverse", False))),
 )
 
 # Quota recovery config

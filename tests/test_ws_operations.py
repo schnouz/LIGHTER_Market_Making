@@ -1614,6 +1614,37 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
             self.assertIsNotNone(levels[0][1])
             self.assertGreater(levels[0][1], 101.0)
 
+    def test_toxic_flow_guard_suppresses_weak_spread_risk_side_before_severe_markout(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            TOXIC_FLOW_GUARD_CONFIG=mm.ToxicFlowGuardConfig(
+                enabled=True,
+                observe_only=False,
+                min_samples=4,
+                adverse_threshold_bps=2.0,
+                severe_adverse_bps=7.0,
+                spread_capture_floor_bps=0.5,
+                inventory_ratio_trigger=0.25,
+                suppress_on_weak_spread_adverse=True,
+            ),
+        ):
+            levels = mm._apply_toxic_flow_guard(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=-1.0,
+                max_pos_usd=200.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    adverse_bps=2.4,
+                    spread_capture_bps=0.35,
+                    sample_count=8,
+                ),
+            )
+
+            self.assertIsNotNone(levels[0][0])
+            self.assertEqual(levels[0][1], None)
+            self.assertLess(levels[0][0], 99.0)
+
     def test_toxic_flow_guard_observe_only_keeps_quotes(self):
         with temp_mm_attrs(
             MARKET_ID=1,

@@ -45,6 +45,50 @@ def test_toxic_flow_guard_observe_only_keeps_action_metadata():
     assert decision.suppress_side == "sell"
 
 
+def test_toxic_flow_guard_suppresses_on_weak_spread_plus_adverse_markout():
+    decision = evaluate_toxic_flow_guard(
+        config=ToxicFlowGuardConfig(
+            min_samples=4,
+            adverse_threshold_bps=2.0,
+            severe_adverse_bps=7.0,
+            spread_capture_floor_bps=0.5,
+            inventory_ratio_trigger=0.25,
+            suppress_on_weak_spread_adverse=True,
+        ),
+        adverse_bps=2.4,
+        sample_count=16,
+        spread_capture_bps=0.35,
+        inventory_ratio=0.47,
+        position_size=-0.001,
+    )
+
+    assert decision.active
+    assert decision.suppress_side == "sell"
+    assert decision.reason == "weak_spread_capture_suppress_sell"
+
+
+def test_toxic_flow_guard_does_not_suppress_weak_spread_when_flat():
+    decision = evaluate_toxic_flow_guard(
+        config=ToxicFlowGuardConfig(
+            min_samples=4,
+            adverse_threshold_bps=2.0,
+            severe_adverse_bps=7.0,
+            spread_capture_floor_bps=0.5,
+            inventory_ratio_trigger=0.25,
+            suppress_on_weak_spread_adverse=True,
+        ),
+        adverse_bps=2.4,
+        sample_count=16,
+        spread_capture_bps=0.35,
+        inventory_ratio=0.0,
+        position_size=0.0,
+    )
+
+    assert decision.active
+    assert decision.suppress_side is None
+    assert decision.reason == "toxic_flow"
+
+
 def test_shadow_report_summarizes_trade_and_markout_logs(tmp_path):
     trade_path = tmp_path / "trades_BTC.csv"
     markout_path = tmp_path / "markouts_BTC.csv"

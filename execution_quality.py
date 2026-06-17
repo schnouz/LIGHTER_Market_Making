@@ -61,6 +61,7 @@ class ToxicFlowGuardConfig:
     spread_widen_per_adverse_bps: float = 0.08
     max_spread_multiplier: float = 1.8
     suppress_risk_side: bool = True
+    suppress_on_weak_spread_adverse: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,11 +133,16 @@ def evaluate_toxic_flow_guard(
         1.0 + excess * max(config.spread_widen_per_adverse_bps, 0.0) + 0.15 * spread_component,
     )
 
-    suppress_side: Optional[str] = None
-    if (
-        config.suppress_risk_side
-        and adverse >= config.severe_adverse_bps
+    weak_spread_adverse = (
+        config.suppress_on_weak_spread_adverse
+        and spread_deficit > 0
+        and adverse >= config.adverse_threshold_bps
         and inv_ratio >= config.inventory_ratio_trigger
+    )
+
+    suppress_side: Optional[str] = None
+    if config.suppress_risk_side and inv_ratio >= config.inventory_ratio_trigger and (
+        adverse >= config.severe_adverse_bps or weak_spread_adverse
     ):
         if position_size > 0:
             suppress_side = "buy"
@@ -145,7 +151,11 @@ def evaluate_toxic_flow_guard(
 
     reason = "toxic_flow"
     if suppress_side is not None:
-        reason = f"toxic_flow_suppress_{suppress_side}"
+        reason = (
+            f"weak_spread_capture_suppress_{suppress_side}"
+            if weak_spread_adverse and adverse < config.severe_adverse_bps
+            else f"toxic_flow_suppress_{suppress_side}"
+        )
     elif spread_deficit > 0 and excess <= 0:
         reason = "weak_spread_capture"
 
@@ -377,6 +387,12 @@ def config_from_mapping(mapping: dict[str, Any]) -> ToxicFlowGuardConfig:
         ),
         max_spread_multiplier=float(mapping.get("max_spread_multiplier", _DEFAULT_TOXIC_FLOW_GUARD.max_spread_multiplier)),
         suppress_risk_side=bool(mapping.get("suppress_risk_side", _DEFAULT_TOXIC_FLOW_GUARD.suppress_risk_side)),
+        suppress_on_weak_spread_adverse=bool(
+            mapping.get(
+                "suppress_on_weak_spread_adverse",
+                _DEFAULT_TOXIC_FLOW_GUARD.suppress_on_weak_spread_adverse,
+            )
+        ),
     )
 
 
