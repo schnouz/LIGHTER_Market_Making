@@ -3193,11 +3193,11 @@ async def _wait_for_write_slot(op_count: int = 4, cancel_only: bool = False) -> 
     if avail < op_count:
         wait_time = _time_until_ops_free(op_count)
         if wait_time > 30.0:
-            logger.warning("RATE LIMIT: window full (%d/%d ops), need %.1fs — skipping cycle",
+            logger.warning("RATE LIMIT: window full (%d/%d ops), sleeping %.1fs before next send",
                            _prune_op_window(), _RL_OPS_PER_WINDOW, wait_time)
-            return False
-        if wait_time > 0:
+        elif wait_time > 0:
             logger.warning("RATE LIMIT: window capacity low, waiting %.1fs for %d ops", wait_time, op_count)
+        if wait_time > 0:
             await asyncio.sleep(wait_time)
 
     # Phase 3: Minimum send-interval floor

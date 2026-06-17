@@ -1798,8 +1798,13 @@ class TestWindowFullThreshold(unittest.IsolatedAsyncioTestCase):
         # Should have waited (not skipped)
         self.assertGreater(len(sleep_calls), 0)
 
-    async def test_window_full_skips_above_30s(self):
-        """Wait time > 30s should skip."""
+    async def test_window_full_waits_above_30s(self):
+        """Wait time > 30s should sleep instead of hot-looping skips."""
+        sleep_calls = []
+
+        async def _track_sleep(secs):
+            sleep_calls.append(secs)
+
         now = time.monotonic()
         # 40 ops sent 20s ago — they expire at now+40s (> 30s threshold)
         timestamps = mm._op_timestamps.__class__(
@@ -1812,10 +1817,11 @@ class TestWindowFullThreshold(unittest.IsolatedAsyncioTestCase):
             _volume_quota_remaining=1000,
             _op_timestamps=timestamps,
         ):
-            with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch("asyncio.sleep", side_effect=_track_sleep):
                 result = await mm._wait_for_write_slot(op_count=4, cancel_only=False)
 
-        self.assertFalse(result)
+        self.assertTrue(result)
+        self.assertTrue(any(secs > 30.0 for secs in sleep_calls))
 
 
 # ---------------------------------------------------------------------------
