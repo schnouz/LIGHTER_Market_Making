@@ -2315,7 +2315,13 @@ def _should_hold_young_order(
     return new_size > existing_size + max(tolerance, EPSILON)
 
 
-def _risk_increasing_exposure_usd(side: str, *, exclude_level: int, candidate_size: float) -> Optional[float]:
+def _risk_increasing_exposure_usd(
+    side: str,
+    *,
+    exclude_level: int,
+    candidate_size: float,
+    pending_candidate_size: float = 0.0,
+) -> Optional[float]:
     mid_price = state.market.mid_price
     if mid_price is None or mid_price <= 0:
         return None
@@ -2342,17 +2348,30 @@ def _risk_increasing_exposure_usd(side: str, *, exclude_level: int, candidate_si
             exposure_base += size
     if candidate_size > 0:
         exposure_base += candidate_size
+    if pending_candidate_size > 0:
+        exposure_base += pending_candidate_size
     return exposure_base * mid_price
 
 
-def _risk_order_exposure_cap(side: str, level: int, candidate_size: float) -> tuple[bool, Optional[float], Optional[float]]:
+def _risk_order_exposure_cap(
+    side: str,
+    level: int,
+    candidate_size: float,
+    *,
+    pending_candidate_size: float = 0.0,
+) -> tuple[bool, Optional[float], Optional[float]]:
     if not RISK_ORDER_EXPOSURE_CAP_ENABLED:
         return False, None, None
     max_pos_usd = state.account.precomputed_max_pos_usd
     if max_pos_usd <= 0:
         return False, None, None
     cap_usd = max_pos_usd * max(0.0, min(RISK_ORDER_EXPOSURE_BUFFER, 1.0))
-    projected_usd = _risk_increasing_exposure_usd(side, exclude_level=level, candidate_size=candidate_size)
+    projected_usd = _risk_increasing_exposure_usd(
+        side,
+        exclude_level=level,
+        candidate_size=candidate_size,
+        pending_candidate_size=pending_candidate_size,
+    )
     if projected_usd is None:
         return False, None, cap_usd
     return projected_usd > cap_usd + EPSILON, projected_usd, cap_usd
@@ -4125,6 +4144,7 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
     ops = []
     orders = state.orders
     effective_threshold = _adaptive_threshold_bps()
+    pending_risk_candidate_sizes = {"buy": 0.0, "sell": 0.0}
     for level, (buy_price, sell_price) in enumerate(level_prices):
         for is_buy, new_price in [(True, buy_price), (False, sell_price)]:
             side = "buy" if is_buy else "sell"
@@ -4161,7 +4181,12 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                 existing_reduce_only = orders.ask_reduce_only[level]
 
             if not reduce_only:
-                capped, projected_usd, cap_usd = _risk_order_exposure_cap(side, level, new_size)
+                capped, projected_usd, cap_usd = _risk_order_exposure_cap(
+                    side,
+                    level,
+                    new_size,
+                    pending_candidate_size=pending_risk_candidate_sizes.get(side, 0.0),
+                )
                 if capped:
                     now = time.monotonic()
                     if now - _last_execution_quality_guard_log >= 60.0:
@@ -4235,6 +4260,9 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                     order_id=existing_id, exchange_id=exchange_id,
                     reduce_only=bool(existing_reduce_only) if existing_reduce_only is not None else reduce_only,
                 ))
+                if not reduce_only:
+                    current_size = existing_size if existing_size is not None else 0.0
+                    pending_risk_candidate_sizes[side] += max(0.0, new_size - current_size)
             else:
                 # No existing order — create new one
                 new_order_id = next_client_order_index()
@@ -4244,6 +4272,8 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                     order_id=new_order_id, exchange_id=0,
                     reduce_only=reduce_only,
                 ))
+                if not reduce_only:
+                    pending_risk_candidate_sizes[side] += new_size
     return ops
 
 

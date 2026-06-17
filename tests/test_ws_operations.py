@@ -964,6 +964,25 @@ class TestCollectOrderOperations(unittest.TestCase):
             self.assertEqual(ops[0].side, "sell")
             self.assertEqual(ops[0].action, "create")
 
+    def test_collect_counts_same_batch_risk_creates_against_exposure_cap(self):
+        """Multiple same-batch creates should not jointly exceed the risk exposure cap."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            current_mid_price_cached=100.0,
+            current_position_size=-0.70,
+            precomputed_max_pos_usd=150.0,
+            RISK_ORDER_EXPOSURE_CAP_ENABLED=True,
+            RISK_ORDER_EXPOSURE_BUFFER=0.90,
+        ):
+            ops = mm.collect_order_operations([(None, 101.0), (None, 102.0)], base_amount=0.60)
+
+            self.assertEqual(len(ops), 1)
+            self.assertEqual(ops[0].side, "sell")
+            self.assertEqual(ops[0].level, 0)
+            self.assertEqual(ops[0].action, "create")
+
     def test_collect_cancels_existing_risk_order_over_exposure_cap(self):
         """Existing risk-adding orders are cancelled if position plus live orders exceed the cap."""
         with temp_mm_attrs(
