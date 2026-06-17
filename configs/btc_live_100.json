@@ -46,6 +46,18 @@
             "derisk_max_extra_tighten": 0.55,
             "derisk_min_depth_factor": 0.2
         },
+        "toxic_flow_guard": {
+            "enabled": true,
+            "observe_only": false,
+            "min_samples": 12,
+            "adverse_threshold_bps": 3.0,
+            "severe_adverse_bps": 8.0,
+            "spread_capture_floor_bps": 0.5,
+            "inventory_ratio_trigger": 0.25,
+            "spread_widen_per_adverse_bps": 0.08,
+            "max_spread_multiplier": 1.8,
+            "suppress_risk_side": true
+        },
         "quote_engine": "cartea_jaimungal",
         "cartea_jaimungal": {
             "use_estimator": true,

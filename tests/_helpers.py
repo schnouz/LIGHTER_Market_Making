@@ -78,6 +78,7 @@ def temp_mm_attrs(**overrides):
     mm._inventory_exit_only_since = 0.0
     mm._last_inventory_hysteresis_log = 0.0
     mm._last_inventory_derisk_log = 0.0
+    mm._last_toxic_flow_guard_log = 0.0
     # Save/restore local_order_book by replacing with a fresh empty book on teardown.
     # Cannot deepcopy because CBookSide (Cython) doesn't support __reduce__.
     saved_ob = mm.state.market.local_order_book
@@ -133,6 +134,7 @@ def temp_mm_attrs(**overrides):
         mm._inventory_exit_only_since = 0.0
         mm._last_inventory_hysteresis_log = 0.0
         mm._last_inventory_derisk_log = 0.0
+        mm._last_toxic_flow_guard_log = 0.0
         # Restore original if it was replaced, or reset to fresh empty book
         # if tests mutated the object in-place.
         if 'local_order_book' in overrides:

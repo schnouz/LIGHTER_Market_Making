@@ -1372,6 +1372,62 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
             self.assertLess(long_levels[0][0], 990.0)
             self.assertLess(long_levels[0][1], 1010.0)
 
+    def test_toxic_flow_guard_suppresses_long_risk_side(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            TOXIC_FLOW_GUARD_CONFIG=mm.ToxicFlowGuardConfig(
+                enabled=True,
+                observe_only=False,
+                min_samples=4,
+                adverse_threshold_bps=2.0,
+                severe_adverse_bps=6.0,
+                inventory_ratio_trigger=0.2,
+            ),
+        ):
+            levels = mm._apply_toxic_flow_guard(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=1.0,
+                max_pos_usd=200.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    adverse_bps=7.0,
+                    spread_capture_bps=0.2,
+                    sample_count=8,
+                ),
+            )
+
+            self.assertEqual(levels[0][0], None)
+            self.assertIsNotNone(levels[0][1])
+            self.assertGreater(levels[0][1], 101.0)
+
+    def test_toxic_flow_guard_observe_only_keeps_quotes(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            TOXIC_FLOW_GUARD_CONFIG=mm.ToxicFlowGuardConfig(
+                enabled=True,
+                observe_only=True,
+                min_samples=4,
+                adverse_threshold_bps=2.0,
+                severe_adverse_bps=6.0,
+                inventory_ratio_trigger=0.2,
+            ),
+        ):
+            levels = mm._apply_toxic_flow_guard(
+                [(99.0, 101.0)],
+                mid_price=100.0,
+                position_size=-1.0,
+                max_pos_usd=200.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    adverse_bps=7.0,
+                    spread_capture_bps=0.2,
+                    sample_count=8,
+                ),
+            )
+
+            self.assertEqual(levels, [(99.0, 101.0)])
+
     def test_inventory_hysteresis_keeps_short_reduce_only_until_exit_ratio(self):
         with temp_mm_attrs(
             MARKET_ID=1,

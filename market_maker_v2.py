@@ -58,6 +58,7 @@ from vol_obi import VolObiCalculator
 from cartea_jaimungal import CarteaJaimungalCalculator, CarteaJaimungalParams
 from lighter_estimators import CJSnapshot, LighterCJEstimator
 from live_metrics import LiveMetricsTracker, LiveStateStore, QualityAdjustment
+from execution_quality import ToxicFlowGuardConfig, evaluate_toxic_flow_guard
 from binance_obi import (
     BinanceBookTickerClient, BinanceDiffDepthClient,
     SharedAlpha, SharedBBO, lighter_to_binance_symbol,
@@ -271,6 +272,34 @@ INVENTORY_DERISK_MAX_EXTRA_TIGHTEN = float(os.getenv(
 INVENTORY_DERISK_MIN_DEPTH_FACTOR = float(os.getenv(
     "INVENTORY_DERISK_MIN_DEPTH_FACTOR",
     _inventory_bias_cfg.get("derisk_min_depth_factor", 0.20)))
+
+_toxic_flow_cfg = _trading.get("toxic_flow_guard", {})
+TOXIC_FLOW_GUARD_CONFIG = ToxicFlowGuardConfig(
+    enabled=_env_bool("TOXIC_FLOW_GUARD_ENABLED", bool(_toxic_flow_cfg.get("enabled", True))),
+    observe_only=_env_bool("TOXIC_FLOW_GUARD_OBSERVE_ONLY", bool(_toxic_flow_cfg.get("observe_only", False))),
+    min_samples=int(os.getenv("TOXIC_FLOW_MIN_SAMPLES", _toxic_flow_cfg.get("min_samples", 12))),
+    adverse_threshold_bps=float(os.getenv(
+        "TOXIC_FLOW_ADVERSE_THRESHOLD_BPS",
+        _toxic_flow_cfg.get("adverse_threshold_bps", 3.0))),
+    severe_adverse_bps=float(os.getenv(
+        "TOXIC_FLOW_SEVERE_ADVERSE_BPS",
+        _toxic_flow_cfg.get("severe_adverse_bps", 8.0))),
+    spread_capture_floor_bps=float(os.getenv(
+        "TOXIC_FLOW_SPREAD_CAPTURE_FLOOR_BPS",
+        _toxic_flow_cfg.get("spread_capture_floor_bps", 0.5))),
+    inventory_ratio_trigger=float(os.getenv(
+        "TOXIC_FLOW_INVENTORY_RATIO_TRIGGER",
+        _toxic_flow_cfg.get("inventory_ratio_trigger", 0.25))),
+    spread_widen_per_adverse_bps=float(os.getenv(
+        "TOXIC_FLOW_SPREAD_WIDEN_PER_ADVERSE_BPS",
+        _toxic_flow_cfg.get("spread_widen_per_adverse_bps", 0.08))),
+    max_spread_multiplier=float(os.getenv(
+        "TOXIC_FLOW_MAX_SPREAD_MULTIPLIER",
+        _toxic_flow_cfg.get("max_spread_multiplier", 1.8))),
+    suppress_risk_side=_env_bool(
+        "TOXIC_FLOW_SUPPRESS_RISK_SIDE",
+        bool(_toxic_flow_cfg.get("suppress_risk_side", True))),
+)
 
 # Quota recovery config
 _quota_recovery_cfg = _perf.get("quota_recovery", {})
@@ -596,6 +625,7 @@ for _sub_logger_name in (
     'orderbook_sanity',
     'cartea_jaimungal',
     'lighter_estimators',
+    'execution_quality',
 ):
     _sub = logging.getLogger(_sub_logger_name)
     _sub.handlers = logger.handlers
@@ -670,6 +700,7 @@ _inventory_exit_only_side = 0
 _inventory_exit_only_since = 0.0
 _last_inventory_hysteresis_log = 0.0
 _last_inventory_derisk_log = 0.0
+_last_toxic_flow_guard_log = 0.0
 
 
 def _enqueue_order_event(event: OrderEvent) -> None:
@@ -4301,6 +4332,78 @@ def _apply_quality_spread_multiplier(level_prices, mid_price: float, multiplier:
     return adjusted
 
 
+def _apply_toxic_flow_guard(
+    level_prices,
+    mid_price: float,
+    position_size: float,
+    max_pos_usd: Optional[float],
+    quality_adjustment: QualityAdjustment,
+):
+    """Apply a microstructure guard driven by recent adverse markouts.
+
+    The existing live-quality logic widens both sides when recent fills have
+    poor markouts.  This layer adds an inventory-aware action: when flow is
+    clearly toxic and the bot already carries inventory, stop quoting the side
+    that would add more of that inventory.
+    """
+    global _last_toxic_flow_guard_log
+
+    if mid_price <= 0:
+        return level_prices
+    inventory_ratio = _inventory_ratio(position_size, mid_price, max_pos_usd)
+    decision = evaluate_toxic_flow_guard(
+        config=TOXIC_FLOW_GUARD_CONFIG,
+        adverse_bps=quality_adjustment.adverse_bps,
+        sample_count=quality_adjustment.sample_count,
+        spread_capture_bps=quality_adjustment.spread_capture_bps,
+        inventory_ratio=inventory_ratio,
+        position_size=position_size,
+    )
+    if not decision.active:
+        return level_prices
+
+    now = time.monotonic()
+    if now - _last_toxic_flow_guard_log >= 60.0:
+        log_fn = logger.info if decision.observe_only else logger.warning
+        log_fn(
+            "Toxic flow guard %s: reason=%s score=%.3f adverse=%.2fbps spread_capture=%.2fbps "
+            "samples=%d inv_ratio=%.3f spread_mult=%.3f suppress_side=%s",
+            "observing" if decision.observe_only else "active",
+            decision.reason,
+            decision.toxicity_score,
+            decision.adverse_bps,
+            decision.spread_capture_bps,
+            decision.sample_count,
+            decision.inventory_ratio,
+            decision.spread_multiplier,
+            decision.suppress_side or "none",
+        )
+        _last_toxic_flow_guard_log = now
+
+    if decision.observe_only:
+        return level_prices
+
+    adjusted = level_prices
+    if decision.spread_multiplier > 1.0001:
+        adjusted = _apply_quality_spread_multiplier(adjusted, mid_price, decision.spread_multiplier)
+
+    if decision.suppress_side is None:
+        return adjusted
+
+    suppressed = []
+    for bid, ask in adjusted:
+        if decision.suppress_side == "buy":
+            suppressed.append((None, ask))
+        elif decision.suppress_side == "sell":
+            suppressed.append((bid, None))
+        else:
+            suppressed.append((bid, ask))
+
+    if all(bid is None and ask is None for bid, ask in suppressed) and abs(position_size) >= EPSILON:
+        return _fallback_reduce_only_quote_levels(mid_price, position_size)
+    return suppressed
+
+
 def _apply_inventory_exit_bias(
     level_prices,
     mid_price: float,
@@ -4837,6 +4940,13 @@ async def market_making_loop(client):
                     quality_adjustment.spread_multiplier,
                 )
                 _maybe_log_quality_adjustment(quality_adjustment)
+            level_prices = _apply_toxic_flow_guard(
+                level_prices,
+                snap_mid,
+                snap_position,
+                _max_pos,
+                quality_adjustment,
+            )
             level_prices = _apply_inventory_exit_bias(
                 level_prices,
                 snap_mid,

@@ -97,6 +97,7 @@ class QualityAdjustment:
     spread_multiplier: float = 1.0
     size_multiplier: float = 1.0
     adverse_bps: float = 0.0
+    spread_capture_bps: float = 0.0
     sample_count: int = 0
     reason: str = "neutral"
 
@@ -316,11 +317,16 @@ class LiveMetricsTracker:
         return self._markouts[nearest]
 
     def _compute_adjustment(self) -> QualityAdjustment:
+        spread_capture = mean(v for _, v in self._spread_capture) if self._spread_capture else 0.0
         if not self.adaptive_enabled:
-            return QualityAdjustment(reason="disabled")
+            return QualityAdjustment(spread_capture_bps=spread_capture, reason="disabled")
         samples = self._samples_for_horizon(self.adaptive_horizon)
         if len(samples) < 4:
-            return QualityAdjustment(sample_count=len(samples), reason="insufficient_markouts")
+            return QualityAdjustment(
+                spread_capture_bps=spread_capture,
+                sample_count=len(samples),
+                reason="insufficient_markouts",
+            )
         adverse = mean(value[2] for value in samples)
         long_horizon = max(self.horizons, default=self.adaptive_horizon)
         if long_horizon != self.adaptive_horizon:
@@ -330,7 +336,12 @@ class LiveMetricsTracker:
                 adverse = max(adverse, long_adverse * 0.75)
         excess = max(0.0, adverse - self.adverse_threshold_bps)
         if excess <= 0:
-            return QualityAdjustment(adverse_bps=adverse, sample_count=len(samples), reason="healthy")
+            return QualityAdjustment(
+                adverse_bps=adverse,
+                spread_capture_bps=spread_capture,
+                sample_count=len(samples),
+                reason="healthy",
+            )
         spread_multiplier = min(
             self.max_spread_multiplier,
             1.0 + excess * self.spread_widen_per_bps,
@@ -343,6 +354,7 @@ class LiveMetricsTracker:
             spread_multiplier=spread_multiplier,
             size_multiplier=size_multiplier,
             adverse_bps=adverse,
+            spread_capture_bps=spread_capture,
             sample_count=len(samples),
             reason="adverse_markout",
         )
@@ -420,6 +432,7 @@ class LiveMetricsTracker:
                     "spread_multiplier": self._last_adjustment.spread_multiplier,
                     "size_multiplier": self._last_adjustment.size_multiplier,
                     "adverse_bps": self._last_adjustment.adverse_bps,
+                    "spread_capture_bps": self._last_adjustment.spread_capture_bps,
                     "sample_count": self._last_adjustment.sample_count,
                     "reason": self._last_adjustment.reason,
                 },
