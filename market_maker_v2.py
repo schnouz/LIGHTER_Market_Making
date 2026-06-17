@@ -738,6 +738,7 @@ _inventory_exit_only_since = 0.0
 _last_inventory_hysteresis_log = 0.0
 _last_inventory_derisk_log = 0.0
 _last_toxic_flow_guard_log = 0.0
+_last_flat_quote_fallback_log = 0.0
 
 
 def _enqueue_order_event(event: OrderEvent) -> None:
@@ -4431,6 +4432,7 @@ def calculate_order_prices(mid_price, position_size=0.0, capital=None, base_amou
     When position value exceeds the dynamic max, the side that would
     *increase* exposure is suppressed (set to ``None``).
     """
+    global _last_flat_quote_fallback_log
     none_levels = [(None, None)] * NUM_LEVELS
     if not _cj_estimator_gate_allows_quote():
         if abs(position_size) >= EPSILON:
@@ -4453,7 +4455,14 @@ def calculate_order_prices(mid_price, position_size=0.0, capital=None, base_amou
             if buy_0 is None and sell_0 is None:
                 if abs(position_size) >= EPSILON:
                     return _fallback_reduce_only_quote_levels(mid_price, position_size)
-                return none_levels
+                now = time.monotonic()
+                if now - _last_flat_quote_fallback_log >= 60.0:
+                    logger.warning(
+                        "%s quote returned no flat levels after warmup; using conservative fallback quotes",
+                        QUOTE_ENGINE,
+                    )
+                    _last_flat_quote_fallback_log = now
+                return _fallback_flat_quote_levels(mid_price)
 
             # Hard position limit: suppress side that would increase exposure
             if max_pos_usd <= 0:
@@ -4913,6 +4922,38 @@ def _fallback_reduce_only_quote_levels(mid_price: float, position_size: float):
         if bid >= mid_price:
             bid = mid_price - min_depth
         levels[0] = (bid, None)
+    return levels
+
+
+def _fallback_flat_quote_levels(mid_price: float):
+    """Return conservative two-sided quotes when the warmed model abstains.
+
+    This is deliberately used only after the quote gate and calculator warmup
+    have already passed. It prevents a silent flat no-quote state when the
+    model has enough data but returns no levels for the current microstructure.
+    """
+    none_levels = [(None, None)] * NUM_LEVELS
+    if mid_price <= 0:
+        return none_levels
+
+    tick = state.config.price_tick_float
+    min_depth = tick if tick > 0 else max(mid_price * 1e-6, 1e-9)
+    fallback_bps = max(CJ_MIN_HALF_SPREAD_BPS, VOL_OBI_MIN_HALF_SPREAD_BPS, 1.0)
+    base_depth = max(mid_price * fallback_bps / 10_000.0, min_depth)
+
+    levels = []
+    for lvl in range(NUM_LEVELS):
+        depth = base_depth * _SPREAD_FACTORS[lvl]
+        bid = mid_price - depth
+        ask = mid_price + depth
+        if tick > 0:
+            bid = math.floor(bid / tick) * tick
+            ask = math.ceil(ask / tick) * tick
+        if bid >= mid_price:
+            bid = mid_price - min_depth
+        if ask <= mid_price:
+            ask = mid_price + min_depth
+        levels.append((bid, ask))
     return levels
 
 

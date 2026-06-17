@@ -117,6 +117,40 @@ class TestSpreadModeIntegration(unittest.TestCase):
         self.assertIsNone(sell)
         self.assertLess(buy, 65_800.0)
 
+    def test_flat_gets_conservative_quotes_when_warmed_model_withholds_quotes(self):
+        """A warmed model abstention must not leave flat live quoting silent."""
+
+        class NoQuoteCalc:
+            warmed_up = True
+
+            def quote(self, mid_price, position_size):
+                return None, None
+
+        with temp_mm_attrs(
+            vol_obi_calc=NoQuoteCalc(),
+            _PRICE_TICK_FLOAT=0.1,
+            current_position_size=0.0,
+            CJ_MIN_HALF_SPREAD_BPS=4.0,
+            VOL_OBI_MIN_HALF_SPREAD_BPS=8.0,
+            SPREAD_FACTOR_LEVEL1=2.0,
+            _SPREAD_FACTORS=[1.0, 2.0],
+        ):
+            levels = mm.calculate_order_prices(
+                65_800.0,
+                position_size=0.0,
+                max_pos_usd=130.0,
+            )
+
+        buy, sell = levels[0]
+        self.assertIsNotNone(buy)
+        self.assertIsNotNone(sell)
+        self.assertLess(buy, 65_800.0)
+        self.assertGreater(sell, 65_800.0)
+        if mm.NUM_LEVELS > 1:
+            buy_1, sell_1 = levels[1]
+            self.assertLess(buy_1, buy)
+            self.assertGreater(sell_1, sell)
+
     def test_binance_alpha_overrides_lighter_obi(self):
         """When alpha override is active, calculator uses the injected alpha."""
         # Use min_half_spread_bps=0 to avoid the floor clamping both to the same price
