@@ -239,6 +239,38 @@ INVENTORY_MAX_ADD_WIDEN = float(os.getenv(
 INVENTORY_ADVERSE_BOOST_PER_BPS = float(os.getenv(
     "INVENTORY_ADVERSE_BOOST_PER_BPS",
     _inventory_bias_cfg.get("adverse_boost_per_bps", 0.03)))
+INVENTORY_EXIT_HYSTERESIS_ENABLED = _env_bool(
+    "INVENTORY_EXIT_HYSTERESIS_ENABLED",
+    bool(_inventory_bias_cfg.get("hysteresis_enabled", True)),
+)
+INVENTORY_EXIT_HYSTERESIS_ENTER_RATIO = float(os.getenv(
+    "INVENTORY_EXIT_HYSTERESIS_ENTER_RATIO",
+    _inventory_bias_cfg.get("hysteresis_enter_ratio", 1.0)))
+INVENTORY_EXIT_HYSTERESIS_EXIT_RATIO = float(os.getenv(
+    "INVENTORY_EXIT_HYSTERESIS_EXIT_RATIO",
+    _inventory_bias_cfg.get("hysteresis_exit_ratio", 0.5)))
+INVENTORY_DERISK_ENABLED = _env_bool(
+    "INVENTORY_DERISK_ENABLED",
+    bool(_inventory_bias_cfg.get("derisk_enabled", True)),
+)
+INVENTORY_DERISK_START_RATIO = float(os.getenv(
+    "INVENTORY_DERISK_START_RATIO",
+    _inventory_bias_cfg.get("derisk_start_ratio", 0.75)))
+INVENTORY_DERISK_ADVERSE_TRIGGER_BPS = float(os.getenv(
+    "INVENTORY_DERISK_ADVERSE_TRIGGER_BPS",
+    _inventory_bias_cfg.get("derisk_adverse_trigger_bps", 10.0)))
+INVENTORY_DERISK_ADVERSE_FULL_BPS = float(os.getenv(
+    "INVENTORY_DERISK_ADVERSE_FULL_BPS",
+    _inventory_bias_cfg.get("derisk_adverse_full_bps", 50.0)))
+INVENTORY_DERISK_TIME_TO_MAX_SECONDS = float(os.getenv(
+    "INVENTORY_DERISK_TIME_TO_MAX_SECONDS",
+    _inventory_bias_cfg.get("derisk_time_to_max_seconds", 900.0)))
+INVENTORY_DERISK_MAX_EXTRA_TIGHTEN = float(os.getenv(
+    "INVENTORY_DERISK_MAX_EXTRA_TIGHTEN",
+    _inventory_bias_cfg.get("derisk_max_extra_tighten", 0.55)))
+INVENTORY_DERISK_MIN_DEPTH_FACTOR = float(os.getenv(
+    "INVENTORY_DERISK_MIN_DEPTH_FACTOR",
+    _inventory_bias_cfg.get("derisk_min_depth_factor", 0.20)))
 
 # Quota recovery config
 _quota_recovery_cfg = _perf.get("quota_recovery", {})
@@ -633,6 +665,11 @@ _last_quality_adjustment_log = 0.0
 _account_trade_accept_after_ms = 0
 _last_live_accounting_sync_log = 0.0
 _last_inventory_exit_bias_log = 0.0
+_inventory_exit_only_active = False
+_inventory_exit_only_side = 0
+_inventory_exit_only_since = 0.0
+_last_inventory_hysteresis_log = 0.0
+_last_inventory_derisk_log = 0.0
 
 
 def _enqueue_order_event(event: OrderEvent) -> None:
@@ -1808,8 +1845,13 @@ def _sync_live_accounting_to_exchange(reason: str) -> bool:
 
     now = time.monotonic()
     if now - _last_live_accounting_sync_log >= 30.0:
-        logger.warning(
-            "Live fill accounting resynced to exchange position (%s): local %.8f -> exchange %.8f",
+        expected_ws_reconcile = reason in {
+            "account_all_position_update",
+            "post_account_all_trade_batch",
+        }
+        log = logger.info if expected_ws_reconcile else logger.warning
+        log(
+            "Live fill accounting reconciled to exchange position (%s): local %.8f -> exchange %.8f",
             reason,
             old_pos,
             exchange_pos,
@@ -4345,6 +4387,194 @@ def _apply_inventory_exit_bias(
     return adjusted
 
 
+def _inventory_ratio(position_size: float, mid_price: float, max_pos_usd: Optional[float]) -> float:
+    if mid_price <= 0 or not max_pos_usd or max_pos_usd <= 0:
+        return 0.0
+    return abs(position_size) * mid_price / max_pos_usd
+
+
+def _position_side(position_size: float) -> int:
+    if position_size > EPSILON:
+        return 1
+    if position_size < -EPSILON:
+        return -1
+    return 0
+
+
+def _position_adverse_bps(position_size: float, mid_price: float) -> float:
+    if mid_price <= 0 or abs(position_size) < EPSILON:
+        return 0.0
+    entry = _extract_position_entry_vwap()
+    if entry is None or entry <= 0:
+        entry = _live_fill_entry_vwap
+    if entry <= 0:
+        return 0.0
+    if position_size > 0:
+        return max(0.0, (entry - mid_price) / entry * 10_000.0)
+    return max(0.0, (mid_price - entry) / entry * 10_000.0)
+
+
+def _update_inventory_exit_only_mode(
+    position_size: float,
+    mid_price: float,
+    max_pos_usd: Optional[float],
+) -> tuple[bool, float]:
+    """Maintain hysteresis for inventory-only exits.
+
+    Once inventory breaches the enter ratio, the bot keeps the risk-increasing
+    side disabled until the ratio has fallen below the lower exit threshold.
+    """
+    global _inventory_exit_only_active, _inventory_exit_only_side
+    global _inventory_exit_only_since, _last_inventory_hysteresis_log
+
+    if not INVENTORY_EXIT_HYSTERESIS_ENABLED:
+        _inventory_exit_only_active = False
+        _inventory_exit_only_side = 0
+        _inventory_exit_only_since = 0.0
+        return False, _inventory_ratio(position_size, mid_price, max_pos_usd)
+
+    side = _position_side(position_size)
+    ratio = _inventory_ratio(position_size, mid_price, max_pos_usd)
+    now = time.monotonic()
+
+    enter_ratio = max(INVENTORY_EXIT_HYSTERESIS_ENTER_RATIO, 0.0)
+    exit_ratio = max(0.0, min(INVENTORY_EXIT_HYSTERESIS_EXIT_RATIO, enter_ratio))
+
+    if side == 0:
+        if _inventory_exit_only_active and now - _last_inventory_hysteresis_log >= 30.0:
+            logger.info("Inventory exit-only mode cleared: position flat")
+            _last_inventory_hysteresis_log = now
+        _inventory_exit_only_active = False
+        _inventory_exit_only_side = 0
+        _inventory_exit_only_since = 0.0
+        return False, ratio
+
+    if _inventory_exit_only_active and _inventory_exit_only_side != side:
+        logger.info("Inventory exit-only mode side changed; resetting hysteresis")
+        _inventory_exit_only_active = False
+        _inventory_exit_only_side = 0
+        _inventory_exit_only_since = 0.0
+
+    if _inventory_exit_only_active:
+        if ratio <= exit_ratio:
+            logger.info(
+                "Inventory exit-only mode cleared: ratio %.3f <= %.3f",
+                ratio,
+                exit_ratio,
+            )
+            _inventory_exit_only_active = False
+            _inventory_exit_only_side = 0
+            _inventory_exit_only_since = 0.0
+        elif now - _last_inventory_hysteresis_log >= 60.0:
+            logger.info(
+                "Inventory exit-only mode active: side=%s ratio=%.3f until <= %.3f",
+                "long" if side > 0 else "short",
+                ratio,
+                exit_ratio,
+            )
+            _last_inventory_hysteresis_log = now
+    adverse_bps = _position_adverse_bps(position_size, mid_price)
+    adverse_enter = (
+        ratio >= exit_ratio
+        and adverse_bps >= max(INVENTORY_DERISK_ADVERSE_TRIGGER_BPS, 0.0)
+    )
+    should_arm = ratio >= enter_ratio or adverse_enter
+    if not _inventory_exit_only_active and should_arm:
+        _inventory_exit_only_active = True
+        _inventory_exit_only_side = side
+        _inventory_exit_only_since = now
+        logger.warning(
+            "Inventory exit-only mode armed: side=%s ratio=%.3f adverse=%.2fbps threshold=%.3f",
+            "long" if side > 0 else "short",
+            ratio,
+            adverse_bps,
+            enter_ratio if ratio >= enter_ratio else exit_ratio,
+        )
+
+    return _inventory_exit_only_active, ratio
+
+
+def _derisk_extra_tighten(position_size: float, mid_price: float, ratio: float) -> tuple[float, float]:
+    if not INVENTORY_DERISK_ENABLED or abs(position_size) < EPSILON or mid_price <= 0:
+        return 0.0, 0.0
+
+    adverse_bps = _position_adverse_bps(position_size, mid_price)
+    ratio_den = max(1.0 - INVENTORY_DERISK_START_RATIO, 1e-9)
+    ratio_component = max(0.0, (ratio - INVENTORY_DERISK_START_RATIO) / ratio_den)
+
+    adverse_den = max(INVENTORY_DERISK_ADVERSE_FULL_BPS, 1e-9)
+    adverse_component = max(0.0, (adverse_bps - INVENTORY_DERISK_ADVERSE_TRIGGER_BPS) / adverse_den)
+
+    time_component = 0.0
+    if _inventory_exit_only_active and _inventory_exit_only_since > 0 and adverse_bps > 0:
+        time_component = max(
+            0.0,
+            (time.monotonic() - _inventory_exit_only_since)
+            / max(INVENTORY_DERISK_TIME_TO_MAX_SECONDS, 1.0),
+        )
+
+    pressure = min(1.0, max(ratio_component, adverse_component, time_component))
+    if pressure <= 0:
+        return 0.0, adverse_bps
+    return max(INVENTORY_DERISK_MAX_EXTRA_TIGHTEN, 0.0) * pressure, adverse_bps
+
+
+def _apply_inventory_exit_hysteresis(
+    level_prices,
+    mid_price: float,
+    position_size: float,
+    max_pos_usd: Optional[float],
+):
+    active, ratio = _update_inventory_exit_only_mode(position_size, mid_price, max_pos_usd)
+    if not active:
+        return level_prices
+
+    tick = state.config.price_tick_float
+    min_depth = tick if tick > 0 else max(mid_price * 1e-6, 1e-9)
+    min_factor = min(1.0, max(INVENTORY_DERISK_MIN_DEPTH_FACTOR, 0.01))
+    extra_tighten, adverse_bps = _derisk_extra_tighten(position_size, mid_price, ratio)
+    depth_factor = max(min_factor, 1.0 - min(extra_tighten, 0.95))
+
+    adjusted = []
+    for bid, ask in level_prices:
+        if position_size < 0:
+            new_bid = bid
+            if bid is not None and extra_tighten > 0:
+                depth = max(mid_price - bid, min_depth) * depth_factor
+                new_bid = mid_price - depth
+                if tick > 0:
+                    new_bid = math.floor(new_bid / tick) * tick
+                if new_bid >= mid_price:
+                    new_bid = mid_price - min_depth
+            adjusted.append((new_bid, None))
+        else:
+            new_ask = ask
+            if ask is not None and extra_tighten > 0:
+                depth = max(ask - mid_price, min_depth) * depth_factor
+                new_ask = mid_price + depth
+                if tick > 0:
+                    new_ask = math.ceil(new_ask / tick) * tick
+                if new_ask <= mid_price:
+                    new_ask = mid_price + min_depth
+            adjusted.append((None, new_ask))
+
+    if all(bid is None and ask is None for bid, ask in adjusted):
+        adjusted = _fallback_reduce_only_quote_levels(mid_price, position_size)
+
+    global _last_inventory_derisk_log
+    now = time.monotonic()
+    if extra_tighten > 0 and now - _last_inventory_derisk_log >= 60.0:
+        logger.warning(
+            "Inventory de-risk ladder active: ratio=%.3f adverse=%.2fbps extra_tighten=%.3f depth_factor=%.3f",
+            ratio,
+            adverse_bps,
+            extra_tighten,
+            depth_factor,
+        )
+        _last_inventory_derisk_log = now
+    return adjusted
+
+
 def _fallback_reduce_only_quote_levels(mid_price: float, position_size: float):
     """Return a single passive reducing quote when the model withholds quotes.
 
@@ -4613,6 +4843,12 @@ async def market_making_loop(client):
                 snap_position,
                 _max_pos,
                 quality_adjustment,
+            )
+            level_prices = _apply_inventory_exit_hysteresis(
+                level_prices,
+                snap_mid,
+                snap_position,
+                _max_pos,
             )
 
             buy_0, sell_0 = level_prices[0]
@@ -4898,6 +5134,8 @@ async def main():
     global _live_fill_entry_vwap, _live_fill_realized_pnl
     global _cj_estimator, _last_cj_refresh, _last_cj_estimator_ready, _last_cj_gate_log
     global _account_trade_accept_after_ms, _last_live_accounting_sync_log
+    global _inventory_exit_only_active, _inventory_exit_only_side, _inventory_exit_only_since
+    global _last_inventory_hysteresis_log, _last_inventory_derisk_log
 
     _order_event_queue.clear()
     _pending_trades.clear()
@@ -4913,6 +5151,11 @@ async def main():
     _live_fill_realized_pnl = 0.0
     _account_trade_accept_after_ms = 0 if DRY_RUN else int(time.time() * 1000)
     _last_live_accounting_sync_log = 0.0
+    _inventory_exit_only_active = False
+    _inventory_exit_only_side = 0
+    _inventory_exit_only_since = 0.0
+    _last_inventory_hysteresis_log = 0.0
+    _last_inventory_derisk_log = 0.0
 
     if DRY_RUN:
         logger.info("🚀 === Market Maker v2 Starting — DRY-RUN MODE (no exchange writes) ===")

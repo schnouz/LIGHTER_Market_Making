@@ -1372,6 +1372,87 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
             self.assertLess(long_levels[0][0], 990.0)
             self.assertLess(long_levels[0][1], 1010.0)
 
+    def test_inventory_hysteresis_keeps_short_reduce_only_until_exit_ratio(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            INVENTORY_EXIT_HYSTERESIS_ENABLED=True,
+            INVENTORY_EXIT_HYSTERESIS_ENTER_RATIO=1.0,
+            INVENTORY_EXIT_HYSTERESIS_EXIT_RATIO=0.5,
+            INVENTORY_DERISK_ENABLED=False,
+        ):
+            armed = mm._apply_inventory_exit_hysteresis(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=-2.1,
+                max_pos_usd=200.0,
+            )
+            still_armed = mm._apply_inventory_exit_hysteresis(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=-1.2,
+                max_pos_usd=200.0,
+            )
+            cleared = mm._apply_inventory_exit_hysteresis(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=-0.8,
+                max_pos_usd=200.0,
+            )
+
+            self.assertEqual(armed, [(99.0, None), (98.0, None)])
+            self.assertEqual(still_armed, [(99.0, None), (98.0, None)])
+            self.assertEqual(cleared, [(99.0, 101.0), (98.0, 102.0)])
+
+    def test_inventory_derisk_tightens_adverse_short_reduce_bid(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            current_position_size=-2.0,
+            account_positions={},
+            _live_fill_entry_vwap=100.0,
+            INVENTORY_EXIT_HYSTERESIS_ENABLED=True,
+            INVENTORY_EXIT_HYSTERESIS_ENTER_RATIO=1.0,
+            INVENTORY_EXIT_HYSTERESIS_EXIT_RATIO=0.5,
+            INVENTORY_DERISK_ENABLED=True,
+            INVENTORY_DERISK_ADVERSE_TRIGGER_BPS=5.0,
+            INVENTORY_DERISK_ADVERSE_FULL_BPS=20.0,
+            INVENTORY_DERISK_MAX_EXTRA_TIGHTEN=0.5,
+            INVENTORY_DERISK_MIN_DEPTH_FACTOR=0.2,
+        ):
+            levels = mm._apply_inventory_exit_hysteresis(
+                [(100.0, 102.0)],
+                mid_price=101.0,
+                position_size=-2.0,
+                max_pos_usd=200.0,
+            )
+
+            self.assertIsNone(levels[0][1])
+            self.assertGreater(levels[0][0], 100.0)
+            self.assertLess(levels[0][0], 101.0)
+
+    def test_inventory_hysteresis_arms_on_adverse_position_after_restart(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            current_position_size=1.1,
+            account_positions={},
+            _live_fill_entry_vwap=100.0,
+            INVENTORY_EXIT_HYSTERESIS_ENABLED=True,
+            INVENTORY_EXIT_HYSTERESIS_ENTER_RATIO=1.0,
+            INVENTORY_EXIT_HYSTERESIS_EXIT_RATIO=0.5,
+            INVENTORY_DERISK_ADVERSE_TRIGGER_BPS=10.0,
+            INVENTORY_DERISK_ENABLED=False,
+        ):
+            levels = mm._apply_inventory_exit_hysteresis(
+                [(98.0, 100.0)],
+                mid_price=98.0,
+                position_size=1.1,
+                max_pos_usd=200.0,
+            )
+
+            self.assertEqual(levels, [(None, 100.0)])
+
     def test_startup_trade_echo_is_ignored_and_resyncs_accounting(self):
         """Recent-trade echoes from account_all must not double-count after restart."""
         saved_logger = mm._trade_logger

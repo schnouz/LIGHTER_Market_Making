@@ -34,7 +34,17 @@
             "add_widen_per_ratio": 0.75,
             "max_exit_tighten": 0.35,
             "max_add_widen": 0.65,
-            "adverse_boost_per_bps": 0.03
+            "adverse_boost_per_bps": 0.03,
+            "hysteresis_enabled": true,
+            "hysteresis_enter_ratio": 1.0,
+            "hysteresis_exit_ratio": 0.5,
+            "derisk_enabled": true,
+            "derisk_start_ratio": 0.75,
+            "derisk_adverse_trigger_bps": 10.0,
+            "derisk_adverse_full_bps": 50.0,
+            "derisk_time_to_max_seconds": 900.0,
+            "derisk_max_extra_tighten": 0.55,
+            "derisk_min_depth_factor": 0.2
         },
         "quote_engine": "cartea_jaimungal",
         "cartea_jaimungal": {
