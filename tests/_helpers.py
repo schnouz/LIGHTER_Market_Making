@@ -15,6 +15,8 @@ _STATE_MAP = {
     'current_ask_price':       lambda: (mm.state.orders, 'ask_prices', 0),
     'current_bid_size':        lambda: (mm.state.orders, 'bid_sizes', 0),
     'current_ask_size':        lambda: (mm.state.orders, 'ask_sizes', 0),
+    'current_bid_reduce_only': lambda: (mm.state.orders, 'bid_reduce_only', 0),
+    'current_ask_reduce_only': lambda: (mm.state.orders, 'ask_reduce_only', 0),
     'last_client_order_index': lambda: (mm.state.orders, 'last_client_order_index'),
     'MARKET_ID':               lambda: (mm.state.config, 'market_id'),
     '_PRICE_TICK_FLOAT':       lambda: (mm.state.config, 'price_tick_float'),

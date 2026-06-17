@@ -692,6 +692,7 @@ class OrderEvent:
     order_id: int = 0
     price: float = 0.0
     size: float = 0.0
+    reduce_only: Optional[bool] = None
     remote_orders: list = field(default_factory=list)
     source: str = ""
 
@@ -757,6 +758,8 @@ class OrderState:
     ask_prices: list = field(default_factory=lambda: [None] * NUM_LEVELS)
     bid_sizes: list = field(default_factory=lambda: [None] * NUM_LEVELS)
     ask_sizes: list = field(default_factory=lambda: [None] * NUM_LEVELS)
+    bid_reduce_only: list = field(default_factory=lambda: [None] * NUM_LEVELS)
+    ask_reduce_only: list = field(default_factory=lambda: [None] * NUM_LEVELS)
     last_client_order_index: int = 0
 
 
@@ -1096,6 +1099,8 @@ def _record_research_quote_snapshot(snap: QuoteTelemetryState) -> None:
         "threshold_bps": snap.threshold_bps,
         "live_bid_order_ids": list(state.orders.bid_order_ids),
         "live_ask_order_ids": list(state.orders.ask_order_ids),
+        "live_bid_reduce_only": list(state.orders.bid_reduce_only),
+        "live_ask_reduce_only": list(state.orders.ask_reduce_only),
         "quote_engine": QUOTE_ENGINE,
     }
     _record_research_event("quotes", "quote_snapshot", payload)
@@ -1140,16 +1145,27 @@ class OrderManager:
 
     # -- Private: direct state mutation (called only by drain_events / dry_run) --
 
-    def _bind_live(self, side: str, order_id: int, price: float, size: float, *, level: int = 0) -> None:
+    def _bind_live(
+        self,
+        side: str,
+        order_id: int,
+        price: float,
+        size: float,
+        *,
+        level: int = 0,
+        reduce_only: Optional[bool] = None,
+    ) -> None:
         orders = state.orders
         if side == "buy":
             orders.bid_order_ids[level] = order_id
             orders.bid_prices[level] = price
             orders.bid_sizes[level] = size
+            orders.bid_reduce_only[level] = reduce_only
         else:
             orders.ask_order_ids[level] = order_id
             orders.ask_prices[level] = price
             orders.ask_sizes[level] = size
+            orders.ask_reduce_only[level] = reduce_only
         self.mark_status(side, SideStatus.LIVE, level=level, target_price=price, target_size=size)
 
     def _clear_live(self, side: str, level: Optional[int] = None) -> None:
@@ -1161,10 +1177,12 @@ class OrderManager:
                 orders.bid_order_ids[lvl] = None
                 orders.bid_prices[lvl] = None
                 orders.bid_sizes[lvl] = None
+                orders.bid_reduce_only[lvl] = None
             else:
                 orders.ask_order_ids[lvl] = None
                 orders.ask_prices[lvl] = None
                 orders.ask_sizes[lvl] = None
+                orders.ask_reduce_only[lvl] = None
             self.mark_status(side, SideStatus.IDLE, level=lvl)
 
     def _clear_all(self) -> None:
@@ -1178,7 +1196,14 @@ class OrderManager:
         while _order_event_queue:
             evt = _order_event_queue.popleft()
             if evt.event_type == OrderEventType.BIND_LIVE:
-                self._bind_live(evt.side, evt.order_id, evt.price, evt.size, level=evt.level)
+                self._bind_live(
+                    evt.side,
+                    evt.order_id,
+                    evt.price,
+                    evt.size,
+                    level=evt.level,
+                    reduce_only=evt.reduce_only,
+                )
             elif evt.event_type == OrderEventType.CLEAR_LIVE:
                 self._clear_live(evt.side, level=evt.level)
             elif evt.event_type == OrderEventType.CLEAR_ALL:
@@ -1242,19 +1267,24 @@ class OrderManager:
         if side == "buy":
             current_price = state.orders.bid_prices[level]
             current_size = state.orders.bid_sizes[level]
+            current_reduce_only = state.orders.bid_reduce_only[level]
         else:
             current_price = state.orders.ask_prices[level]
             current_size = state.orders.ask_sizes[level]
+            current_reduce_only = state.orders.ask_reduce_only[level]
         price = _extract_order_price(order)
         size = _extract_order_size(order)
+        reduce_only = _extract_order_reduce_only(order)
         if price is None:
             price = current_price
         if size is None:
             size = current_size
+        if reduce_only is None:
+            reduce_only = current_reduce_only
         if price is None or size is None:
             self.mark_status(side, SideStatus.LIVE, level=level)
             return
-        self._bind_live(side, cid, price, size, level=level)
+        self._bind_live(side, cid, price, size, level=level, reduce_only=reduce_only)
 
 
 class RiskController:
@@ -1751,6 +1781,27 @@ def _extract_order_is_ask(order: dict) -> Optional[bool]:
     return None
 
 
+def _extract_order_reduce_only(order: dict) -> Optional[bool]:
+    raw = order.get("reduce_only")
+    if raw is None:
+        raw = order.get("is_reduce_only")
+    if raw is None:
+        raw = order.get("reduceOnly")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        val = raw.strip().lower()
+        if val in {"1", "true", "yes", "on"}:
+            return True
+        if val in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
 def _extract_order_price(order: dict) -> Optional[float]:
     raw = order.get("price")
     try:
@@ -2219,16 +2270,21 @@ def _sync_tracked_order_from_remote(side: str, level: int, order: dict) -> None:
     if side == "buy":
         current_price = state.orders.bid_prices[level]
         current_size = state.orders.bid_sizes[level]
+        current_reduce_only = state.orders.bid_reduce_only[level]
     else:
         current_price = state.orders.ask_prices[level]
         current_size = state.orders.ask_sizes[level]
+        current_reduce_only = state.orders.ask_reduce_only[level]
 
     price = _extract_order_price(order)
     size = _extract_order_size(order)
+    reduce_only = _extract_order_reduce_only(order)
     if price is None:
         price = current_price
     if size is None:
         size = current_size
+    if reduce_only is None:
+        reduce_only = current_reduce_only
     if price is None or size is None:
         order_manager.mark_status(side, SideStatus.LIVE, level=level)
         return
@@ -2236,6 +2292,7 @@ def _sync_tracked_order_from_remote(side: str, level: int, order: dict) -> None:
         event_type=OrderEventType.BIND_LIVE,
         side=side, level=level,
         order_id=cid, price=price, size=size,
+        reduce_only=reduce_only,
     ))
 
 
@@ -3992,10 +4049,12 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                 existing_id = orders.bid_order_ids[level]
                 existing_price = orders.bid_prices[level]
                 existing_size = orders.bid_sizes[level]
+                existing_reduce_only = orders.bid_reduce_only[level]
             else:
                 existing_id = orders.ask_order_ids[level]
                 existing_price = orders.ask_prices[level]
                 existing_size = orders.ask_sizes[level]
+                existing_reduce_only = orders.ask_reduce_only[level]
 
             if existing_id is not None:
                 exchange_id = _resolve_exchange_id(existing_id)
@@ -4005,6 +4064,18 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                             "Keeping %s[%d]: awaiting exchange order_index for client id %d",
                             side, level, existing_id,
                         )
+                    continue
+                if existing_reduce_only is not None and bool(existing_reduce_only) != reduce_only:
+                    if _log_debug:
+                        logger.debug(
+                            "Cancel %s[%d]: reduce_only changed %s -> %s; recreate next cycle",
+                            side, level, existing_reduce_only, reduce_only,
+                        )
+                    ops.append(BatchOp(
+                        side=side, level=level, action="cancel",
+                        price=0, size=0,
+                        order_id=existing_id, exchange_id=exchange_id,
+                    ))
                     continue
                 change_bps = price_change_bps(existing_price, new_price)
                 size_changed = _size_change_requires_update(existing_size, new_size)
@@ -4020,6 +4091,7 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                     side=side, level=level, action="modify",
                     price=new_price, size=new_size,
                     order_id=existing_id, exchange_id=exchange_id,
+                    reduce_only=bool(existing_reduce_only) if existing_reduce_only is not None else reduce_only,
                 ))
             else:
                 # No existing order — create new one
@@ -4052,6 +4124,7 @@ async def _send_single_op_rest(client, tx_type: int, tx_info, op) -> bool:
                 event_type=OrderEventType.BIND_LIVE,
                 side=op.side, level=op.level,
                 order_id=op.order_id, price=op.price, size=op.size,
+                reduce_only=op.reduce_only,
             ))
         return True
     except Exception as e:
@@ -4326,6 +4399,7 @@ async def sign_and_send_batch(client, ops: list):
                     event_type=OrderEventType.BIND_LIVE,
                     side=op.side, level=op.level,
                     order_id=op.order_id, price=op.price, size=op.size,
+                    reduce_only=op.reduce_only,
                 ))
 
     except Exception as e:

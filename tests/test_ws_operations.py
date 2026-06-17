@@ -756,6 +756,49 @@ class TestCollectOrderOperations(unittest.TestCase):
             self.assertEqual(len(create_ops), 1)
             self.assertEqual(create_ops[0].side, "sell")
 
+    def test_collect_cancels_when_reduce_only_flag_changes(self):
+        """Existing orders must be recreated when reduce_only would change."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS=0.0,
+            current_position_size=1.0,
+        ):
+            mm.state.orders.ask_order_ids[0] = 43
+            mm.state.orders.ask_prices[0] = 101.0
+            mm.state.orders.ask_sizes[0] = 1.0
+            mm.state.orders.ask_reduce_only[0] = False
+            mm._client_to_exchange_id[43] = 430
+
+            ops = mm.collect_order_operations([(100.0, 101.5)], base_amount=1.0)
+
+            ask_ops = [op for op in ops if op.side == "sell"]
+            self.assertEqual(len(ask_ops), 1)
+            self.assertEqual(ask_ops[0].action, "cancel")
+            self.assertEqual(ask_ops[0].order_id, 43)
+            self.assertEqual(ask_ops[0].exchange_id, 430)
+
+    def test_collect_create_marks_reducing_order_reduce_only(self):
+        """New reducing creates should carry reduce_only to the signer."""
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.01,
+            _AMOUNT_TICK_FLOAT=0.001,
+            DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS=0.0,
+            current_position_size=1.0,
+        ):
+            mm.state.orders.ask_order_ids[0] = None
+            mm.state.orders.ask_prices[0] = None
+            mm.state.orders.ask_sizes[0] = None
+
+            ops = mm.collect_order_operations([(None, 101.0)], base_amount=1.0)
+
+            self.assertEqual(len(ops), 1)
+            self.assertEqual(ops[0].side, "sell")
+            self.assertEqual(ops[0].action, "create")
+            self.assertIs(ops[0].reduce_only, True)
+
     def test_collect_skips_when_within_threshold(self):
         """Price within QUOTE_UPDATE_THRESHOLD_BPS -> skip (no op)."""
         with temp_mm_attrs(
@@ -1081,6 +1124,7 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
                         "is_ask": True,
                         "price": "52.5",
                         "remaining_base_amount": "0.25",
+                        "reduce_only": True,
                     }
                 ]}}
                 mm.on_account_orders_update(account_id=1, market_id=1, data=data)
@@ -1094,6 +1138,7 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
                 self.assertEqual(mm.state.orders.ask_order_ids[0], 200)
                 self.assertAlmostEqual(mm.state.orders.ask_prices[0], 52.5)
                 self.assertAlmostEqual(mm.state.orders.ask_sizes[0], 0.25)
+                self.assertIs(mm.state.orders.ask_reduce_only[0], True)
         finally:
             mm.state.orders = original_orders
             mm.state.risk = original_risk
@@ -1166,6 +1211,7 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
                         "is_ask": False,
                         "price": "50.5",
                         "remaining_base_amount": "0.25",
+                        "reduce_only": False,
                     }
                 ]}}
                 mm.on_account_orders_update(account_id=1, market_id=1, data=data)
@@ -1174,6 +1220,7 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
                 self.assertEqual(mm.state.orders.bid_order_ids[0], 300)
                 self.assertAlmostEqual(mm.state.orders.bid_prices[0], 50.5)
                 self.assertAlmostEqual(mm.state.orders.bid_sizes[0], 0.25)
+                self.assertIs(mm.state.orders.bid_reduce_only[0], False)
                 self.assertEqual(mm._client_to_exchange_id[300], 8888)
         finally:
             mm.state.orders = original_orders
