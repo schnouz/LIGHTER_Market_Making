@@ -68,8 +68,10 @@ def temp_mm_attrs(**overrides):
     mm._live_volume_usd = 0.0
     mm._live_state_store = None
     mm._live_metrics = None
+    mm._research_logger = None
     mm._live_fill_seq = 0
     mm._last_quality_adjustment_log = 0.0
+    mm._last_research_log_error = 0.0
     mm._account_trade_accept_after_ms = 0
     mm._last_live_accounting_sync_log = 0.0
     mm._last_inventory_exit_bias_log = 0.0
@@ -124,8 +126,10 @@ def temp_mm_attrs(**overrides):
         mm._live_volume_usd = 0.0
         mm._live_state_store = None
         mm._live_metrics = None
+        mm._research_logger = None
         mm._live_fill_seq = 0
         mm._last_quality_adjustment_log = 0.0
+        mm._last_research_log_error = 0.0
         mm._account_trade_accept_after_ms = 0
         mm._last_live_accounting_sync_log = 0.0
         mm._last_inventory_exit_bias_log = 0.0

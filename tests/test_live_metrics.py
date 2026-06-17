@@ -18,6 +18,7 @@ def test_live_state_store_roundtrips(tmp_path):
 
 
 def test_markout_tracker_writes_adverse_markout_and_metrics(tmp_path):
+    markout_events = []
     tracker = LiveMetricsTracker(
         str(tmp_path),
         "BTC",
@@ -27,6 +28,7 @@ def test_markout_tracker_writes_adverse_markout_and_metrics(tmp_path):
         spread_widen_per_bps=0.1,
         size_reduce_per_bps=0.1,
         metrics_flush_seconds=1,
+        markout_callback=markout_events.append,
     )
     for idx in range(4):
         tracker.record_fill(
@@ -76,3 +78,6 @@ def test_markout_tracker_writes_adverse_markout_and_metrics(tmp_path):
     assert metrics["markouts"]["0.01"]["count"] == 4
     assert metrics["markouts"]["0.01"]["by_side"]["buy"]["count"] == 4
     assert metrics["markouts"]["0.01"]["by_side"]["buy"]["adverse_avg_bps"] > 0
+    assert len(markout_events) == 4
+    assert markout_events[0]["horizon_sec"] == 0.01
+    assert markout_events[0]["adverse_bps"] > 0

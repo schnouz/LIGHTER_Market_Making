@@ -20,7 +20,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from statistics import mean
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 def _utc_now() -> str:
@@ -120,6 +120,7 @@ class LiveMetricsTracker:
         size_reduce_per_bps: float = 0.06,
         min_size_multiplier: float = 0.55,
         metrics_flush_seconds: float = 10.0,
+        markout_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ):
         os.makedirs(log_dir, exist_ok=True)
         self.symbol = symbol
@@ -133,6 +134,7 @@ class LiveMetricsTracker:
         self.size_reduce_per_bps = max(float(size_reduce_per_bps), 0.0)
         self.min_size_multiplier = min(max(float(min_size_multiplier), 0.05), 1.0)
         self.metrics_flush_seconds = max(float(metrics_flush_seconds), 1.0)
+        self.markout_callback = markout_callback
 
         self.markout_path = os.path.join(log_dir, f"markouts_{symbol}.csv")
         self.metrics_path = os.path.join(log_dir, f"live_metrics_{symbol}.json")
@@ -285,6 +287,29 @@ class LiveMetricsTracker:
                     "" if obs.client_order_index is None else str(obs.client_order_index),
                     "" if obs.exchange_order_index is None else str(obs.exchange_order_index),
                 ])
+                if self.markout_callback is not None:
+                    try:
+                        self.markout_callback({
+                            "fill_id": obs.fill_id,
+                            "horizon_sec": horizon,
+                            "side": obs.side,
+                            "fill_price": obs.price,
+                            "size": obs.size,
+                            "notional_usd": obs.price * obs.size,
+                            "mid_at_fill": obs.mid_at_fill,
+                            "mid_at_markout": mid,
+                            "markout_bps": markout_bps,
+                            "adverse_bps": adverse_bps,
+                            "spread_capture_bps": obs.spread_capture_bps,
+                            "position_after": obs.position_after,
+                            "realized_delta_usd": obs.realized_delta_usd,
+                            "realized_pnl_cumulative": obs.realized_pnl_cumulative,
+                            "fill_source": obs.fill_source,
+                            "client_order_index": obs.client_order_index,
+                            "exchange_order_index": obs.exchange_order_index,
+                        })
+                    except Exception:
+                        pass
             if len(obs.settled_horizons) < len(self.horizons):
                 keep.append(obs)
         self._pending = keep

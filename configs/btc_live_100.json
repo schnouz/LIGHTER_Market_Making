@@ -27,6 +27,15 @@
             "min_size_multiplier": 0.55,
             "metrics_flush_seconds": 10
         },
+        "research_logging": {
+            "enabled": true,
+            "root_dir": "logs/research",
+            "raw_retention_days": 3,
+            "compressed_retention_days": 30,
+            "max_total_mb": 5120,
+            "cleanup_interval_seconds": 3600,
+            "compress_previous_days": true
+        },
         "inventory_exit_bias": {
             "enabled": true,
             "min_ratio": 0.05,

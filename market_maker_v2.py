@@ -59,6 +59,7 @@ from cartea_jaimungal import CarteaJaimungalCalculator, CarteaJaimungalParams
 from lighter_estimators import CJSnapshot, LighterCJEstimator
 from live_metrics import LiveMetricsTracker, LiveStateStore, QualityAdjustment
 from execution_quality import ToxicFlowGuardConfig, evaluate_toxic_flow_guard
+from research_log import ResearchJsonlLogger, ResearchLogConfig
 from binance_obi import (
     BinanceBookTickerClient, BinanceDiffDepthClient,
     SharedAlpha, SharedBBO, lighter_to_binance_symbol,
@@ -135,6 +136,38 @@ MAKER_FEE_RATE = float(os.getenv(
 
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+
+_research_logging_cfg = _trading.get("research_logging", {})
+RESEARCH_LOG_CONFIG = ResearchLogConfig(
+    enabled=_env_bool(
+        "RESEARCH_LOG_ENABLED",
+        bool(_research_logging_cfg.get("enabled", False)),
+    ),
+    root_dir=os.getenv(
+        "RESEARCH_LOG_ROOT_DIR",
+        _research_logging_cfg.get("root_dir", os.path.join(LOG_DIR, "research")),
+    ),
+    raw_retention_days=int(os.getenv(
+        "RESEARCH_LOG_RAW_RETENTION_DAYS",
+        _research_logging_cfg.get("raw_retention_days", 3),
+    )),
+    compressed_retention_days=int(os.getenv(
+        "RESEARCH_LOG_COMPRESSED_RETENTION_DAYS",
+        _research_logging_cfg.get("compressed_retention_days", 30),
+    )),
+    max_total_bytes=int(float(os.getenv(
+        "RESEARCH_LOG_MAX_TOTAL_MB",
+        _research_logging_cfg.get("max_total_mb", 5120),
+    )) * 1024 * 1024),
+    cleanup_interval_seconds=float(os.getenv(
+        "RESEARCH_LOG_CLEANUP_INTERVAL_SECONDS",
+        _research_logging_cfg.get("cleanup_interval_seconds", 3600.0),
+    )),
+    compress_previous_days=_env_bool(
+        "RESEARCH_LOG_COMPRESS_PREVIOUS_DAYS",
+        bool(_research_logging_cfg.get("compress_previous_days", True)),
+    ),
+)
 
 # Trading config
 BASE_AMOUNT = float(os.getenv(
@@ -626,6 +659,7 @@ for _sub_logger_name in (
     'cartea_jaimungal',
     'lighter_estimators',
     'execution_quality',
+    'research_log',
 ):
     _sub = logging.getLogger(_sub_logger_name)
     _sub.handlers = logger.handlers
@@ -690,8 +724,10 @@ _live_fill_count = 0
 _live_volume_usd = 0.0
 _live_state_store: Optional[LiveStateStore] = None
 _live_metrics: Optional[LiveMetricsTracker] = None
+_research_logger: Optional[ResearchJsonlLogger] = None
 _live_fill_seq = 0
 _last_quality_adjustment_log = 0.0
+_last_research_log_error = 0.0
 _account_trade_accept_after_ms = 0
 _last_live_accounting_sync_log = 0.0
 _last_inventory_exit_bias_log = 0.0
@@ -999,6 +1035,79 @@ def _publish_quote_telemetry(
     _quote_telemetry.max_pos_usd = max_pos_usd
     _quote_telemetry.quota_remaining = quota_remaining
     _quote_telemetry.threshold_bps = threshold_bps
+
+
+def _record_research_event(stream: str, event_type: str, payload: dict) -> None:
+    global _last_research_log_error
+    if _research_logger is None or not _research_logger.enabled:
+        return
+    try:
+        _research_logger.append(stream, event_type, payload)
+    except Exception as exc:
+        now = time.monotonic()
+        if now - _last_research_log_error >= 60.0:
+            logger.warning("Research JSONL append failed: %s", exc)
+            _last_research_log_error = now
+
+
+def _write_research_summary(name: str, payload: dict) -> None:
+    global _last_research_log_error
+    if _research_logger is None or not _research_logger.enabled:
+        return
+    try:
+        _research_logger.write_summary(payload, name=name)
+    except Exception as exc:
+        now = time.monotonic()
+        if now - _last_research_log_error >= 60.0:
+            logger.warning("Research JSON summary write failed: %s", exc)
+            _last_research_log_error = now
+
+
+def _record_research_quote_snapshot(snap: QuoteTelemetryState) -> None:
+    if snap.updated_at <= 0 or snap.mid is None or snap.mid <= 0:
+        return
+    if snap.buy_0 is None and snap.sell_0 is None:
+        return
+    bid_depth_bps = None
+    ask_depth_bps = None
+    if snap.buy_0 is not None:
+        bid_depth_bps = (snap.mid - snap.buy_0) / snap.mid * 10_000
+    if snap.sell_0 is not None:
+        ask_depth_bps = (snap.sell_0 - snap.mid) / snap.mid * 10_000
+    position_value_usd = abs(snap.position_size or 0.0) * snap.mid
+    inventory_ratio = (
+        position_value_usd / snap.max_pos_usd
+        if snap.max_pos_usd and snap.max_pos_usd > 0
+        else 0.0
+    )
+    mode = "one_sided" if (snap.buy_0 is None or snap.sell_0 is None) else "two_sided"
+    payload = {
+        "mode": mode,
+        "mid": snap.mid,
+        "position_size": snap.position_size,
+        "position_value_usd": position_value_usd,
+        "inventory_ratio": inventory_ratio,
+        "buy_0": snap.buy_0,
+        "sell_0": snap.sell_0,
+        "bid_depth_bps": bid_depth_bps,
+        "ask_depth_bps": ask_depth_bps,
+        "max_pos_usd": snap.max_pos_usd,
+        "quota_remaining": snap.quota_remaining,
+        "threshold_bps": snap.threshold_bps,
+        "live_bid_order_ids": list(state.orders.bid_order_ids),
+        "live_ask_order_ids": list(state.orders.ask_order_ids),
+        "quote_engine": QUOTE_ENGINE,
+    }
+    _record_research_event("quotes", "quote_snapshot", payload)
+    _write_research_summary("live_latest", payload)
+
+
+def _record_research_fill(payload: dict) -> None:
+    _record_research_event("fills", "live_fill", payload)
+
+
+def _record_research_markout(payload: dict) -> None:
+    _record_research_event("markouts", "markout", payload)
 
 
 class OrderManager:
@@ -2823,6 +2932,27 @@ def _process_pending_trades() -> None:
                             client_order_index=client_order_index,
                             exchange_order_index=exchange_order_index,
                         )
+                    _record_research_fill({
+                        "fill_id": fill_id,
+                        "trade_identity": trade_identity,
+                        "exchange_timestamp": trade.get("timestamp") or trade.get("time"),
+                        "side": side,
+                        "price": price,
+                        "size": size,
+                        "level": fill_context.level if fill_context is not None else 0,
+                        "notional_usd": price * size,
+                        "fee_usd": fee_usd,
+                        "position_after": position_after,
+                        "inventory_after_usd": position_after * (mid_at_fill or price),
+                        "entry_vwap_after": entry_vwap_after,
+                        "realized_delta_usd": realized_delta,
+                        "realized_pnl_cumulative": realized_cumulative,
+                        "mid_at_fill": mid_at_fill,
+                        "spread_capture_bps": spread_capture_bps,
+                        "client_order_index": client_order_index,
+                        "exchange_order_index": exchange_order_index,
+                        "fill_source": fill_source,
+                    })
     finally:
         _sync_live_accounting_to_exchange("post_account_all_trade_batch")
         _pending_trades_scheduled = False
@@ -5103,6 +5233,12 @@ async def quote_telemetry_loop(
                     snap.threshold_bps,
                 )
 
+            if (snap.updated_at > 0
+                    and now - snap.updated_at <= stale_after
+                    and (snap.buy_0 is not None or snap.sell_0 is not None)
+                    and snap.mid is not None):
+                _record_research_quote_snapshot(snap)
+
             quota_stuck = (
                 not DRY_RUN
                 and _volume_quota_remaining is not None
@@ -5246,6 +5382,7 @@ async def main():
     global _account_trade_accept_after_ms, _last_live_accounting_sync_log
     global _inventory_exit_only_active, _inventory_exit_only_side, _inventory_exit_only_since
     global _last_inventory_hysteresis_log, _last_inventory_derisk_log
+    global _research_logger
 
     _order_event_queue.clear()
     _pending_trades.clear()
@@ -5266,6 +5403,7 @@ async def main():
     _inventory_exit_only_since = 0.0
     _last_inventory_hysteresis_log = 0.0
     _last_inventory_derisk_log = 0.0
+    _research_logger = None
 
     if DRY_RUN:
         logger.info("🚀 === Market Maker v2 Starting — DRY-RUN MODE (no exchange writes) ===")
@@ -5286,6 +5424,15 @@ async def main():
     state.config.amount_tick_size = Decimal(str(amount_tick)) if amount_tick else Decimal(0)
     state.config.price_tick_float = float(state.config.price_tick_size)
     state.config.amount_tick_float = float(state.config.amount_tick_size)
+    _research_logger = ResearchJsonlLogger(RESEARCH_LOG_CONFIG, MARKET_SYMBOL)
+    if _research_logger.enabled:
+        logger.info(
+            "Research JSONL logging enabled: root=%s raw=%dd compressed=%dd cap=%.1fMB",
+            _research_logger.root,
+            RESEARCH_LOG_CONFIG.raw_retention_days,
+            RESEARCH_LOG_CONFIG.compressed_retention_days,
+            RESEARCH_LOG_CONFIG.max_total_bytes / 1024 / 1024,
+        )
 
     # Fetch exchange-level minimum order sizes
     try:
@@ -5633,6 +5780,7 @@ async def main():
                 size_reduce_per_bps=LIVE_QUALITY_SIZE_REDUCE_PER_BPS,
                 min_size_multiplier=LIVE_QUALITY_MIN_SIZE_MULTIPLIER,
                 metrics_flush_seconds=LIVE_QUALITY_METRICS_FLUSH_SECONDS,
+                markout_callback=_record_research_markout,
             )
             _initialize_live_fill_accounting_from_account()
 
