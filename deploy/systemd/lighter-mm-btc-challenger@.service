@@ -1,0 +1,21 @@
+[Unit]
+Description=Lighter BTC dry-run MM challenger %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/LIGHTER_Market_Making
+Environment=LIGHTER_MM_ROOT=/home/ubuntu/LIGHTER_Market_Making
+Environment=CHALLENGER_CAPITAL=500
+ExecStart=/home/ubuntu/LIGHTER_Market_Making/scripts/run_btc_challenger.sh %i
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Nice=10
+CPUQuota=35%
+MemoryMax=700M
+
+[Install]
+WantedBy=multi-user.target
