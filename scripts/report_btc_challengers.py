@@ -16,7 +16,10 @@ PROFILES = (
     "more_conservative",
     "profit_tighter",
     "trend_defensive",
+    "ultra_selective",
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _float(value, default=0.0):
@@ -77,7 +80,11 @@ def summarize_profile(root: Path, profile: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Summarize BTC MM dry-run challengers")
-    parser.add_argument("--root", default="logs/challengers", help="Challenger log root")
+    parser.add_argument(
+        "--root",
+        default=str(PROJECT_ROOT / "logs" / "challengers"),
+        help="Challenger log root",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of table")
     args = parser.parse_args()
 

@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=ubuntu
+Group=ubuntu
 WorkingDirectory=/home/ubuntu/LIGHTER_Market_Making
 Environment=LIGHTER_MM_ROOT=/home/ubuntu/LIGHTER_Market_Making
 Environment=CHALLENGER_CAPITAL=500
