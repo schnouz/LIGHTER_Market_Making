@@ -58,11 +58,14 @@ def summarize_profile(root: Path, profile: str) -> dict:
     inventory = [_float(row.get("inventory_after_usd")) for row in trades if row.get("inventory_after_usd")]
     realized = [_float(row.get("realized_pnl_cumulative")) for row in trades if row.get("realized_pnl_cumulative")]
 
+    fill_count = int(_float(state.get("fill_count"), len(trades)))
+    volume_usd = _float(state.get("total_volume"), sum(notionals))
+
     return {
         "profile": profile,
         "status": "has_state" if state else "starting",
-        "fills": len(trades),
-        "volume_usd": round(sum(notionals), 4),
+        "fills": fill_count,
+        "volume_usd": round(volume_usd, 4),
         "realized_pnl_usd": round(_float(state.get("realized_pnl"), realized[-1] if realized else 0.0), 6),
         "portfolio_value": round(_float(state.get("portfolio_value")), 6),
         "position": round(_float(state.get("position")), 8),
