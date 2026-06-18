@@ -111,7 +111,7 @@ case "$PROFILE" in
     # Tests whether stale quotes are the main source of adverse fills.  This
     # profile refreshes faster, but keeps wider minimum spreads and strict
     # toxicity gates so it does not simply chase every tick.
-    export MIN_LOOP_INTERVAL="${MIN_LOOP_INTERVAL:-0.12}"
+    export MIN_LOOP_INTERVAL="${FAST_REPRICE_MIN_LOOP_INTERVAL:-0.12}"
     export CAPITAL_USAGE_PERCENT="${CAPITAL_USAGE_PERCENT:-0.10}"
     export DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS="${DEFAULT_QUOTE_UPDATE_THRESHOLD_BPS:-12.0}"
     export MIN_ORDER_LIFETIME_SECONDS="${MIN_ORDER_LIFETIME_SECONDS:-2.5}"
