@@ -382,6 +382,39 @@ class TestMessageGuards(unittest.IsolatedAsyncioTestCase):
         on_message.assert_called_once()
 
     @patch("ws_manager.websockets.connect")
+    async def test_fast_path_suppresses_stale_reconnect_event_during_grace(self, mock_connect):
+        reconnect_event = asyncio.Event()
+        reconnect_event.set()
+        ws = _make_mock_ws(['{"type":"update","n":1}'])
+        connect, state = self._single_connect(ws)
+        mock_connect.side_effect = connect
+        on_disconnect = MagicMock()
+        on_message = MagicMock()
+
+        task = asyncio.create_task(
+            ws_manager.ws_subscribe_fast(
+                channels=[],
+                label="test",
+                on_message=on_message,
+                on_disconnect=on_disconnect,
+                reconnect_event=reconnect_event,
+                reconnect_grace=0.5,
+                recv_timeout=0.5,
+                reconnect_base=0.01,
+                reconnect_max=0.02,
+            )
+        )
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(state["count"], 1)
+        self.assertFalse(reconnect_event.is_set())
+        on_disconnect.assert_not_called()
+        on_message.assert_called_once()
+
+    @patch("ws_manager.websockets.connect")
     async def test_slow_path_callback_exception_does_not_reconnect(self, mock_connect):
         ws = _make_mock_ws(['{"type":"update","n":1}', '{"type":"update","n":2}'])
         connect, state = self._single_connect(ws)

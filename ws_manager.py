@@ -202,6 +202,7 @@ async def ws_subscribe_fast(
     logger=None,
     reconnect_event=None,
     channel_auths: dict | None = None,
+    reconnect_grace: float = 3.0,
 ):
     """Low-overhead WebSocket subscription loop for latency-sensitive feeds.
 
@@ -238,16 +239,23 @@ async def ws_subscribe_fast(
                     await on_connect()
 
                 backoff = reconnect_base  # reset on successful connect
+                reconnect_grace_until = time.monotonic() + max(0.0, reconnect_grace)
 
                 # Tight recv loop — no per-message task creation
                 while True:
                     # Non-blocking reconnect-event check (replaces event_task racing)
                     if reconnect_event is not None and reconnect_event.is_set():
-                        reconnect_event.clear()
-                        logger.info(f"{label} reconnect requested via event; dropping connection for fresh snapshot...")
-                        if on_disconnect:
-                            on_disconnect()
-                        break
+                        if time.monotonic() < reconnect_grace_until:
+                            reconnect_event.clear()
+                            logger.info(
+                                f"{label} reconnect request suppressed during fresh-connection grace"
+                            )
+                        else:
+                            reconnect_event.clear()
+                            logger.info(f"{label} reconnect requested via event; dropping connection for fresh snapshot...")
+                            if on_disconnect:
+                                on_disconnect()
+                            break
 
                     try:
                         message = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
