@@ -81,3 +81,51 @@ def test_markout_tracker_writes_adverse_markout_and_metrics(tmp_path):
     assert len(markout_events) == 4
     assert markout_events[0]["horizon_sec"] == 0.01
     assert markout_events[0]["adverse_bps"] > 0
+
+
+def test_markout_tracker_reports_side_specific_quality_and_momentum(tmp_path):
+    tracker = LiveMetricsTracker(
+        str(tmp_path),
+        "BTC",
+        horizons=[0.01],
+        adaptive_horizon=0.01,
+        trend_horizon_seconds=0.01,
+        metrics_flush_seconds=1,
+    )
+    tracker.update(
+        mid_price=100.0,
+        position_size=0.0,
+        max_pos_usd=100.0,
+        realized_pnl_cumulative=0.0,
+        portfolio_value=1000.0,
+        available_capital=1000.0,
+    )
+    for idx in range(4):
+        tracker.record_fill(
+            fill_id=f"buy-{idx}",
+            side="buy",
+            price=100.0,
+            size=1.0,
+            mid_at_fill=100.0,
+            spread_capture_bps=0.5,
+            position_after=1.0,
+            realized_delta_usd=0.0,
+            realized_pnl_cumulative=0.0,
+            fill_source="test",
+        )
+    time.sleep(0.02)
+
+    adjustment = tracker.update(
+        mid_price=99.0,
+        position_size=0.0,
+        max_pos_usd=100.0,
+        realized_pnl_cumulative=0.0,
+        portfolio_value=1000.0,
+        available_capital=1000.0,
+    )
+
+    assert adjustment.buy_sample_count == 4
+    assert adjustment.sell_sample_count == 0
+    assert adjustment.buy_adverse_bps > 0
+    assert adjustment.buy_markout_bps < 0
+    assert adjustment.momentum_bps < 0

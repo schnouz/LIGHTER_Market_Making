@@ -31,7 +31,8 @@
             "max_spread_multiplier": 1.5,
             "size_reduce_per_adverse_bps": 0.08,
             "min_size_multiplier": 0.45,
-            "metrics_flush_seconds": 10
+            "metrics_flush_seconds": 10,
+            "trend_horizon_seconds": 600
         },
         "research_logging": {
             "enabled": true,
@@ -67,12 +68,22 @@
             "min_samples": 12,
             "adverse_threshold_bps": 2.0,
             "severe_adverse_bps": 7.0,
-            "spread_capture_floor_bps": 0.5,
+            "spread_capture_floor_bps": 0.8,
             "inventory_ratio_trigger": 0.25,
             "spread_widen_per_adverse_bps": 0.08,
             "max_spread_multiplier": 2.2,
             "suppress_risk_side": true,
             "suppress_on_weak_spread_adverse": true
+        },
+        "adverse_trend_guard": {
+            "enabled": true,
+            "observe_only": false,
+            "min_side_samples": 4,
+            "trend_threshold_bps": 12.0,
+            "side_adverse_threshold_bps": 1.75,
+            "markout_loss_threshold_bps": 1.0,
+            "spread_capture_floor_bps": 0.8,
+            "cooldown_seconds": 180
         },
         "quote_engine": "cartea_jaimungal",
         "cartea_jaimungal": {

@@ -1672,6 +1672,102 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
 
             self.assertEqual(levels, [(99.0, 101.0)])
 
+    def test_adverse_trend_guard_suppresses_buy_risk_in_downtrend(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            ADVERSE_TREND_GUARD_ENABLED=True,
+            ADVERSE_TREND_GUARD_OBSERVE_ONLY=False,
+            ADVERSE_TREND_MIN_SIDE_SAMPLES=4,
+            ADVERSE_TREND_THRESHOLD_BPS=10.0,
+            ADVERSE_TREND_SIDE_ADVERSE_BPS=1.5,
+            ADVERSE_TREND_MARKOUT_LOSS_BPS=1.0,
+            ADVERSE_TREND_SPREAD_FLOOR_BPS=0.8,
+            ADVERSE_TREND_COOLDOWN_SECONDS=0.0,
+            _adverse_trend_suppress_until={"buy": 0.0, "sell": 0.0},
+        ):
+            levels = mm._apply_adverse_trend_guard(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=0.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    spread_capture_bps=0.5,
+                    buy_adverse_bps=2.0,
+                    buy_markout_bps=-1.5,
+                    buy_sample_count=6,
+                    sell_adverse_bps=0.2,
+                    sell_markout_bps=0.5,
+                    sell_sample_count=6,
+                    momentum_bps=-15.0,
+                ),
+            )
+
+            self.assertEqual(levels[0][0], None)
+            self.assertEqual(levels[1][0], None)
+            self.assertIsNotNone(levels[0][1])
+
+    def test_adverse_trend_guard_keeps_reducing_buy_for_short_inventory(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            ADVERSE_TREND_GUARD_ENABLED=True,
+            ADVERSE_TREND_GUARD_OBSERVE_ONLY=False,
+            ADVERSE_TREND_MIN_SIDE_SAMPLES=4,
+            ADVERSE_TREND_THRESHOLD_BPS=10.0,
+            ADVERSE_TREND_SIDE_ADVERSE_BPS=1.5,
+            ADVERSE_TREND_MARKOUT_LOSS_BPS=1.0,
+            ADVERSE_TREND_SPREAD_FLOOR_BPS=0.8,
+            _adverse_trend_suppress_until={"buy": 0.0, "sell": 0.0},
+        ):
+            levels = mm._apply_adverse_trend_guard(
+                [(99.0, 101.0)],
+                mid_price=100.0,
+                position_size=-1.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    spread_capture_bps=0.5,
+                    buy_adverse_bps=2.0,
+                    buy_markout_bps=-1.5,
+                    buy_sample_count=6,
+                    momentum_bps=-15.0,
+                ),
+            )
+
+            self.assertEqual(levels, [(99.0, 101.0)])
+
+    def test_adverse_trend_guard_suppresses_sell_risk_in_uptrend(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            ADVERSE_TREND_GUARD_ENABLED=True,
+            ADVERSE_TREND_GUARD_OBSERVE_ONLY=False,
+            ADVERSE_TREND_MIN_SIDE_SAMPLES=4,
+            ADVERSE_TREND_THRESHOLD_BPS=10.0,
+            ADVERSE_TREND_SIDE_ADVERSE_BPS=1.5,
+            ADVERSE_TREND_MARKOUT_LOSS_BPS=1.0,
+            ADVERSE_TREND_SPREAD_FLOOR_BPS=0.8,
+            ADVERSE_TREND_COOLDOWN_SECONDS=0.0,
+            _adverse_trend_suppress_until={"buy": 0.0, "sell": 0.0},
+        ):
+            levels = mm._apply_adverse_trend_guard(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=0.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    spread_capture_bps=0.5,
+                    buy_adverse_bps=0.2,
+                    buy_markout_bps=0.4,
+                    buy_sample_count=6,
+                    sell_adverse_bps=2.2,
+                    sell_markout_bps=-1.2,
+                    sell_sample_count=6,
+                    momentum_bps=15.0,
+                ),
+            )
+
+            self.assertIsNotNone(levels[0][0])
+            self.assertEqual(levels[0][1], None)
+            self.assertEqual(levels[1][1], None)
+
     def test_inventory_hysteresis_keeps_short_reduce_only_until_exit_ratio(self):
         with temp_mm_attrs(
             MARKET_ID=1,

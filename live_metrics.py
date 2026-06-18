@@ -99,6 +99,13 @@ class QualityAdjustment:
     adverse_bps: float = 0.0
     spread_capture_bps: float = 0.0
     sample_count: int = 0
+    buy_adverse_bps: float = 0.0
+    sell_adverse_bps: float = 0.0
+    buy_markout_bps: float = 0.0
+    sell_markout_bps: float = 0.0
+    buy_sample_count: int = 0
+    sell_sample_count: int = 0
+    momentum_bps: float = 0.0
     reason: str = "neutral"
 
 
@@ -120,6 +127,7 @@ class LiveMetricsTracker:
         size_reduce_per_bps: float = 0.06,
         min_size_multiplier: float = 0.55,
         metrics_flush_seconds: float = 10.0,
+        trend_horizon_seconds: float = 600.0,
         markout_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ):
         os.makedirs(log_dir, exist_ok=True)
@@ -134,6 +142,7 @@ class LiveMetricsTracker:
         self.size_reduce_per_bps = max(float(size_reduce_per_bps), 0.0)
         self.min_size_multiplier = min(max(float(min_size_multiplier), 0.05), 1.0)
         self.metrics_flush_seconds = max(float(metrics_flush_seconds), 1.0)
+        self.trend_horizon_seconds = max(float(trend_horizon_seconds), 0.001)
         self.markout_callback = markout_callback
 
         self.markout_path = os.path.join(log_dir, f"markouts_{symbol}.csv")
@@ -145,6 +154,7 @@ class LiveMetricsTracker:
         )
         self._spread_capture: deque[tuple[float, float]] = deque(maxlen=10_000)
         self._fill_events: deque[tuple[float, str, float, float]] = deque(maxlen=10_000)
+        self._mid_samples: deque[tuple[float, float]] = deque(maxlen=20_000)
         self._inventory_samples: deque[tuple[float, float, float]] = deque(maxlen=20_000)
         self._last_metrics_flush = 0.0
         self._last_adjustment = QualityAdjustment()
@@ -233,6 +243,7 @@ class LiveMetricsTracker:
         now = time.monotonic()
         mid = _finite(mid_price)
         if mid is not None and mid > 0:
+            self._mid_samples.append((now, mid))
             max_pos = _finite(max_pos_usd) or 0.0
             pos_value = abs(float(position_size or 0.0)) * mid
             boundary_ratio = (pos_value / max_pos) if max_pos > 0 else 0.0
@@ -325,6 +336,8 @@ class LiveMetricsTracker:
             self._fill_events.popleft()
         while self._inventory_samples and self._inventory_samples[0][0] < cutoff:
             self._inventory_samples.popleft()
+        while self._mid_samples and self._mid_samples[0][0] < cutoff:
+            self._mid_samples.popleft()
         for samples in self._markouts.values():
             while samples and samples[0][0] < cutoff:
                 samples.popleft()
@@ -341,15 +354,75 @@ class LiveMetricsTracker:
         nearest = min(self._markouts.keys(), key=lambda h: abs(h - horizon))
         return self._markouts[nearest]
 
+    def _side_stats_for_horizon(self, horizon: Optional[float] = None) -> dict[str, tuple[int, float, float]]:
+        if not self._markouts_by_side:
+            return {
+                "buy": (0, 0.0, 0.0),
+                "sell": (0, 0.0, 0.0),
+            }
+        if horizon is None:
+            horizon = self.adaptive_horizon
+        nearest = min(self._markouts_by_side.keys(), key=lambda h: abs(h - horizon))
+        stats: dict[str, tuple[int, float, float]] = {}
+        for side in ("buy", "sell"):
+            samples = self._markouts_by_side.get(nearest, {}).get(side, deque())
+            if samples:
+                stats[side] = (
+                    len(samples),
+                    mean(value[1] for value in samples),
+                    mean(value[2] for value in samples),
+                )
+            else:
+                stats[side] = (0, 0.0, 0.0)
+        return stats
+
+    def _momentum_bps(self) -> float:
+        if len(self._mid_samples) < 2:
+            return 0.0
+        now, current_mid = self._mid_samples[-1]
+        cutoff = now - self.trend_horizon_seconds
+        reference_time, reference_mid = self._mid_samples[0]
+        for sample_time, sample_mid in self._mid_samples:
+            if sample_time <= cutoff:
+                reference_time, reference_mid = sample_time, sample_mid
+            else:
+                break
+        if reference_mid <= 0:
+            return 0.0
+        if now - reference_time < min(30.0, self.trend_horizon_seconds):
+            return 0.0
+        return (current_mid / reference_mid - 1.0) * 10_000.0
+
     def _compute_adjustment(self) -> QualityAdjustment:
         spread_capture = mean(v for _, v in self._spread_capture) if self._spread_capture else 0.0
+        side_stats = self._side_stats_for_horizon(self.adaptive_horizon)
+        buy_count, buy_markout, buy_adverse = side_stats["buy"]
+        sell_count, sell_markout, sell_adverse = side_stats["sell"]
+        momentum_bps = self._momentum_bps()
         if not self.adaptive_enabled:
-            return QualityAdjustment(spread_capture_bps=spread_capture, reason="disabled")
+            return QualityAdjustment(
+                spread_capture_bps=spread_capture,
+                buy_adverse_bps=buy_adverse,
+                sell_adverse_bps=sell_adverse,
+                buy_markout_bps=buy_markout,
+                sell_markout_bps=sell_markout,
+                buy_sample_count=buy_count,
+                sell_sample_count=sell_count,
+                momentum_bps=momentum_bps,
+                reason="disabled",
+            )
         samples = self._samples_for_horizon(self.adaptive_horizon)
         if len(samples) < 4:
             return QualityAdjustment(
                 spread_capture_bps=spread_capture,
                 sample_count=len(samples),
+                buy_adverse_bps=buy_adverse,
+                sell_adverse_bps=sell_adverse,
+                buy_markout_bps=buy_markout,
+                sell_markout_bps=sell_markout,
+                buy_sample_count=buy_count,
+                sell_sample_count=sell_count,
+                momentum_bps=momentum_bps,
                 reason="insufficient_markouts",
             )
         adverse = mean(value[2] for value in samples)
@@ -365,6 +438,13 @@ class LiveMetricsTracker:
                 adverse_bps=adverse,
                 spread_capture_bps=spread_capture,
                 sample_count=len(samples),
+                buy_adverse_bps=buy_adverse,
+                sell_adverse_bps=sell_adverse,
+                buy_markout_bps=buy_markout,
+                sell_markout_bps=sell_markout,
+                buy_sample_count=buy_count,
+                sell_sample_count=sell_count,
+                momentum_bps=momentum_bps,
                 reason="healthy",
             )
         spread_multiplier = min(
@@ -381,6 +461,13 @@ class LiveMetricsTracker:
             adverse_bps=adverse,
             spread_capture_bps=spread_capture,
             sample_count=len(samples),
+            buy_adverse_bps=buy_adverse,
+            sell_adverse_bps=sell_adverse,
+            buy_markout_bps=buy_markout,
+            sell_markout_bps=sell_markout,
+            buy_sample_count=buy_count,
+            sell_sample_count=sell_count,
+            momentum_bps=momentum_bps,
             reason="adverse_markout",
         )
 
@@ -459,6 +546,13 @@ class LiveMetricsTracker:
                     "adverse_bps": self._last_adjustment.adverse_bps,
                     "spread_capture_bps": self._last_adjustment.spread_capture_bps,
                     "sample_count": self._last_adjustment.sample_count,
+                    "buy_adverse_bps": self._last_adjustment.buy_adverse_bps,
+                    "sell_adverse_bps": self._last_adjustment.sell_adverse_bps,
+                    "buy_markout_bps": self._last_adjustment.buy_markout_bps,
+                    "sell_markout_bps": self._last_adjustment.sell_markout_bps,
+                    "buy_sample_count": self._last_adjustment.buy_sample_count,
+                    "sell_sample_count": self._last_adjustment.sell_sample_count,
+                    "momentum_bps": self._last_adjustment.momentum_bps,
                     "reason": self._last_adjustment.reason,
                 },
             },

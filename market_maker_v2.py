@@ -263,6 +263,9 @@ LIVE_QUALITY_MIN_SIZE_MULTIPLIER = float(os.getenv(
 LIVE_QUALITY_METRICS_FLUSH_SECONDS = float(os.getenv(
     "LIVE_QUALITY_METRICS_FLUSH_SECONDS",
     _live_quality_cfg.get("metrics_flush_seconds", 10.0)))
+LIVE_QUALITY_TREND_HORIZON_SECONDS = float(os.getenv(
+    "LIVE_QUALITY_TREND_HORIZON_SECONDS",
+    _live_quality_cfg.get("trend_horizon_seconds", 600.0)))
 
 _inventory_bias_cfg = _trading.get("inventory_exit_bias", {})
 INVENTORY_EXIT_BIAS_ENABLED = _env_bool(
@@ -350,6 +353,34 @@ TOXIC_FLOW_GUARD_CONFIG = ToxicFlowGuardConfig(
         "TOXIC_FLOW_SUPPRESS_ON_WEAK_SPREAD_ADVERSE",
         bool(_toxic_flow_cfg.get("suppress_on_weak_spread_adverse", False))),
 )
+
+_adverse_trend_cfg = _trading.get("adverse_trend_guard", {})
+ADVERSE_TREND_GUARD_ENABLED = _env_bool(
+    "ADVERSE_TREND_GUARD_ENABLED",
+    bool(_adverse_trend_cfg.get("enabled", True)),
+)
+ADVERSE_TREND_GUARD_OBSERVE_ONLY = _env_bool(
+    "ADVERSE_TREND_GUARD_OBSERVE_ONLY",
+    bool(_adverse_trend_cfg.get("observe_only", False)),
+)
+ADVERSE_TREND_MIN_SIDE_SAMPLES = int(os.getenv(
+    "ADVERSE_TREND_MIN_SIDE_SAMPLES",
+    _adverse_trend_cfg.get("min_side_samples", 4)))
+ADVERSE_TREND_THRESHOLD_BPS = float(os.getenv(
+    "ADVERSE_TREND_THRESHOLD_BPS",
+    _adverse_trend_cfg.get("trend_threshold_bps", 12.0)))
+ADVERSE_TREND_SIDE_ADVERSE_BPS = float(os.getenv(
+    "ADVERSE_TREND_SIDE_ADVERSE_BPS",
+    _adverse_trend_cfg.get("side_adverse_threshold_bps", 1.75)))
+ADVERSE_TREND_MARKOUT_LOSS_BPS = float(os.getenv(
+    "ADVERSE_TREND_MARKOUT_LOSS_BPS",
+    _adverse_trend_cfg.get("markout_loss_threshold_bps", 1.0)))
+ADVERSE_TREND_SPREAD_FLOOR_BPS = float(os.getenv(
+    "ADVERSE_TREND_SPREAD_FLOOR_BPS",
+    _adverse_trend_cfg.get("spread_capture_floor_bps", 0.8)))
+ADVERSE_TREND_COOLDOWN_SECONDS = float(os.getenv(
+    "ADVERSE_TREND_COOLDOWN_SECONDS",
+    _adverse_trend_cfg.get("cooldown_seconds", 180.0)))
 
 # Quota recovery config
 _quota_recovery_cfg = _perf.get("quota_recovery", {})
@@ -757,6 +788,8 @@ _inventory_exit_only_since = 0.0
 _last_inventory_hysteresis_log = 0.0
 _last_inventory_derisk_log = 0.0
 _last_toxic_flow_guard_log = 0.0
+_last_adverse_trend_guard_log = 0.0
+_adverse_trend_suppress_until = {"buy": 0.0, "sell": 0.0}
 _last_flat_quote_fallback_log = 0.0
 _last_execution_quality_guard_log = 0.0
 
@@ -4842,6 +4875,125 @@ def _apply_toxic_flow_guard(
     return suppressed
 
 
+def _side_would_increase_exposure(side: str, position_size: float) -> bool:
+    if side == "buy":
+        return position_size >= -EPSILON
+    if side == "sell":
+        return position_size <= EPSILON
+    return False
+
+
+def _apply_adverse_trend_guard(
+    level_prices,
+    mid_price: float,
+    position_size: float,
+    quality_adjustment: QualityAdjustment,
+):
+    """Suppress the risk-adding side when markouts and short-term drift agree.
+
+    A flat/global adverse markout guard is useful, but the losing overnight
+    pattern was directional: buys became toxic during a slow BTC selloff.
+    This guard uses side-specific markouts plus recent mid-price momentum to
+    avoid adding inventory in the direction currently being selected against.
+    """
+    global _last_adverse_trend_guard_log
+
+    if not ADVERSE_TREND_GUARD_ENABLED or mid_price <= 0:
+        return level_prices
+
+    min_samples = max(ADVERSE_TREND_MIN_SIDE_SAMPLES, 1)
+    weak_spread = quality_adjustment.spread_capture_bps < ADVERSE_TREND_SPREAD_FLOOR_BPS
+
+    buy_toxic = (
+        quality_adjustment.buy_sample_count >= min_samples
+        and (
+            quality_adjustment.buy_adverse_bps >= ADVERSE_TREND_SIDE_ADVERSE_BPS
+            or quality_adjustment.buy_markout_bps <= -ADVERSE_TREND_MARKOUT_LOSS_BPS
+        )
+    )
+    sell_toxic = (
+        quality_adjustment.sell_sample_count >= min_samples
+        and (
+            quality_adjustment.sell_adverse_bps >= ADVERSE_TREND_SIDE_ADVERSE_BPS
+            or quality_adjustment.sell_markout_bps <= -ADVERSE_TREND_MARKOUT_LOSS_BPS
+        )
+    )
+
+    now = time.monotonic()
+    suppress_side = None
+    reason = ""
+    if (
+        quality_adjustment.momentum_bps <= -ADVERSE_TREND_THRESHOLD_BPS
+        and buy_toxic
+        and weak_spread
+        and _side_would_increase_exposure("buy", position_size)
+    ):
+        suppress_side = "buy"
+        reason = "downtrend_buy_adverse"
+    elif (
+        quality_adjustment.momentum_bps >= ADVERSE_TREND_THRESHOLD_BPS
+        and sell_toxic
+        and weak_spread
+        and _side_would_increase_exposure("sell", position_size)
+    ):
+        suppress_side = "sell"
+        reason = "uptrend_sell_adverse"
+
+    if suppress_side is not None:
+        _adverse_trend_suppress_until[suppress_side] = max(
+            _adverse_trend_suppress_until.get(suppress_side, 0.0),
+            now + max(ADVERSE_TREND_COOLDOWN_SECONDS, 0.0),
+        )
+    else:
+        for side in ("buy", "sell"):
+            if (
+                now < _adverse_trend_suppress_until.get(side, 0.0)
+                and _side_would_increase_exposure(side, position_size)
+            ):
+                suppress_side = side
+                reason = f"{side}_cooldown"
+                break
+
+    if suppress_side is None:
+        return level_prices
+
+    if now - _last_adverse_trend_guard_log >= 60.0:
+        log_fn = logger.info if ADVERSE_TREND_GUARD_OBSERVE_ONLY else logger.warning
+        log_fn(
+            "Adverse trend guard %s: reason=%s suppress_side=%s momentum=%.2fbps "
+            "spread_capture=%.2fbps buy_adv=%.2fbps sell_adv=%.2fbps "
+            "buy_markout=%.2fbps sell_markout=%.2fbps samples=%d/%d",
+            "observing" if ADVERSE_TREND_GUARD_OBSERVE_ONLY else "active",
+            reason,
+            suppress_side,
+            quality_adjustment.momentum_bps,
+            quality_adjustment.spread_capture_bps,
+            quality_adjustment.buy_adverse_bps,
+            quality_adjustment.sell_adverse_bps,
+            quality_adjustment.buy_markout_bps,
+            quality_adjustment.sell_markout_bps,
+            quality_adjustment.buy_sample_count,
+            quality_adjustment.sell_sample_count,
+        )
+        _last_adverse_trend_guard_log = now
+
+    if ADVERSE_TREND_GUARD_OBSERVE_ONLY:
+        return level_prices
+
+    adjusted = []
+    for bid, ask in level_prices:
+        if suppress_side == "buy":
+            adjusted.append((None, ask))
+        elif suppress_side == "sell":
+            adjusted.append((bid, None))
+        else:
+            adjusted.append((bid, ask))
+
+    if all(bid is None and ask is None for bid, ask in adjusted) and abs(position_size) >= EPSILON:
+        return _fallback_reduce_only_quote_levels(mid_price, position_size)
+    return adjusted
+
+
 def _apply_inventory_exit_bias(
     level_prices,
     mid_price: float,
@@ -5415,6 +5567,12 @@ async def market_making_loop(client):
                 snap_mid,
                 snap_position,
                 _max_pos,
+                quality_adjustment,
+            )
+            level_prices = _apply_adverse_trend_guard(
+                level_prices,
+                snap_mid,
+                snap_position,
                 quality_adjustment,
             )
             level_prices = _apply_inventory_exit_bias(
@@ -6120,6 +6278,7 @@ async def main():
                 size_reduce_per_bps=LIVE_QUALITY_SIZE_REDUCE_PER_BPS,
                 min_size_multiplier=LIVE_QUALITY_MIN_SIZE_MULTIPLIER,
                 metrics_flush_seconds=LIVE_QUALITY_METRICS_FLUSH_SECONDS,
+                trend_horizon_seconds=LIVE_QUALITY_TREND_HORIZON_SECONDS,
                 markout_callback=_record_research_markout,
             )
             _initialize_live_fill_accounting_from_account()
