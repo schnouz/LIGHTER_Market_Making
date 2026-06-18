@@ -17,6 +17,8 @@ PROFILES = (
     "profit_tighter",
     "trend_defensive",
     "ultra_selective",
+    "fast_reprice_guarded",
+    "one_level_defensive",
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

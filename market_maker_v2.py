@@ -722,7 +722,9 @@ for _sub_logger_name in (
 # =========================
 # State objects
 # =========================
-NUM_LEVELS = int(_trading.get("levels_per_side", 2))  # number of order levels per side
+NUM_LEVELS = int(os.getenv(
+    "LEVELS_PER_SIDE",
+    _trading.get("levels_per_side", 2)))  # number of order levels per side
 # Pre-computed spread widening factors per level (avoids per-tick exponentiation)
 _SPREAD_FACTORS = [SPREAD_FACTOR_LEVEL1 ** lvl for lvl in range(max(NUM_LEVELS, 1))]
 
