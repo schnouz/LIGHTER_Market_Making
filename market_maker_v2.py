@@ -325,6 +325,16 @@ INVENTORY_DERISK_MAX_EXTRA_TIGHTEN = float(os.getenv(
 INVENTORY_DERISK_MIN_DEPTH_FACTOR = float(os.getenv(
     "INVENTORY_DERISK_MIN_DEPTH_FACTOR",
     _inventory_bias_cfg.get("derisk_min_depth_factor", 0.20)))
+INVENTORY_PROFIT_CAPTURE_ENABLED = _env_bool(
+    "INVENTORY_PROFIT_CAPTURE_ENABLED",
+    bool(_inventory_bias_cfg.get("profit_capture_enabled", True)),
+)
+INVENTORY_PROFIT_CAPTURE_MIN_USD = float(os.getenv(
+    "INVENTORY_PROFIT_CAPTURE_MIN_USD",
+    _inventory_bias_cfg.get("profit_capture_min_unrealized_usd", 0.10)))
+INVENTORY_PROFIT_CAPTURE_BPS = float(os.getenv(
+    "INVENTORY_PROFIT_CAPTURE_BPS",
+    _inventory_bias_cfg.get("profit_capture_bps", 18.0)))
 
 _toxic_flow_cfg = _trading.get("toxic_flow_guard", {})
 TOXIC_FLOW_GUARD_CONFIG = ToxicFlowGuardConfig(
@@ -787,6 +797,7 @@ _last_research_log_error = 0.0
 _account_trade_accept_after_ms = 0
 _last_live_accounting_sync_log = 0.0
 _last_inventory_exit_bias_log = 0.0
+_last_inventory_profit_capture_log = 0.0
 _inventory_exit_only_active = False
 _inventory_exit_only_side = 0
 _inventory_exit_only_since = 0.0
@@ -5117,6 +5128,87 @@ def _position_adverse_bps(position_size: float, mid_price: float) -> float:
     return max(0.0, (mid_price - entry) / entry * 10_000.0)
 
 
+def _position_unrealized_pnl_usd(position_size: float, mid_price: float) -> tuple[float, float]:
+    if mid_price <= 0 or abs(position_size) < EPSILON:
+        return 0.0, 0.0
+    entry = _extract_position_entry_vwap()
+    if entry is None or entry <= 0:
+        entry = _live_fill_entry_vwap
+    if entry <= 0:
+        return 0.0, 0.0
+    return (mid_price - entry) * position_size, entry
+
+
+def _apply_inventory_profit_capture(
+    level_prices,
+    mid_price: float,
+    position_size: float,
+):
+    """Pull reduce-only quotes closer once inventory is already profitable."""
+    if (
+        not INVENTORY_PROFIT_CAPTURE_ENABLED
+        or mid_price <= 0
+        or abs(position_size) < EPSILON
+        or INVENTORY_PROFIT_CAPTURE_BPS <= 0
+    ):
+        return level_prices
+
+    unrealized_usd, entry = _position_unrealized_pnl_usd(position_size, mid_price)
+    if unrealized_usd < max(INVENTORY_PROFIT_CAPTURE_MIN_USD, 0.0):
+        return level_prices
+
+    tick = state.config.price_tick_float
+    min_depth = tick if tick > 0 else max(mid_price * 1e-6, 1e-9)
+    base_depth = max(mid_price * INVENTORY_PROFIT_CAPTURE_BPS / 10_000.0, min_depth)
+
+    adjusted = []
+    for level, (bid, ask) in enumerate(level_prices):
+        factor = _SPREAD_FACTORS[level] if level < len(_SPREAD_FACTORS) else (level + 1)
+        target_depth = max(base_depth * factor, min_depth)
+        if position_size < 0:
+            # Short inventory: bid is the reduce-only take-profit side.
+            new_bid = bid
+            if bid is not None:
+                current_depth = max(mid_price - bid, min_depth)
+                depth = min(current_depth, target_depth)
+                new_bid = mid_price - depth
+                if tick > 0:
+                    new_bid = math.floor(new_bid / tick) * tick
+                if new_bid >= mid_price:
+                    new_bid = mid_price - min_depth
+                    if tick > 0:
+                        new_bid = math.floor(new_bid / tick) * tick
+            adjusted.append((new_bid, ask))
+        else:
+            # Long inventory: ask is the reduce-only take-profit side.
+            new_ask = ask
+            if ask is not None:
+                current_depth = max(ask - mid_price, min_depth)
+                depth = min(current_depth, target_depth)
+                new_ask = mid_price + depth
+                if tick > 0:
+                    new_ask = math.ceil(new_ask / tick) * tick
+                if new_ask <= mid_price:
+                    new_ask = mid_price + min_depth
+                    if tick > 0:
+                        new_ask = math.ceil(new_ask / tick) * tick
+            adjusted.append((bid, new_ask))
+
+    global _last_inventory_profit_capture_log
+    now = time.monotonic()
+    if now - _last_inventory_profit_capture_log >= 30.0:
+        logger.info(
+            "Inventory profit capture active: pos=%.8f entry=%.4f mid=%.4f unrealized=$%.4f target=%.1fbps",
+            position_size,
+            entry,
+            mid_price,
+            unrealized_usd,
+            INVENTORY_PROFIT_CAPTURE_BPS,
+        )
+        _last_inventory_profit_capture_log = now
+    return adjusted
+
+
 def _update_inventory_exit_only_mode(
     position_size: float,
     mid_price: float,
@@ -5597,6 +5689,11 @@ async def market_making_loop(client):
                 snap_mid,
                 snap_position,
                 _max_pos,
+            )
+            level_prices = _apply_inventory_profit_capture(
+                level_prices,
+                snap_mid,
+                snap_position,
             )
 
             buy_0, sell_0 = level_prices[0]

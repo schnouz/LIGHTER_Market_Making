@@ -57,7 +57,10 @@
             "derisk_adverse_full_bps": 50.0,
             "derisk_time_to_max_seconds": 900.0,
             "derisk_max_extra_tighten": 0.55,
-            "derisk_min_depth_factor": 0.2
+            "derisk_min_depth_factor": 0.2,
+            "profit_capture_enabled": true,
+            "profit_capture_min_unrealized_usd": 0.1,
+            "profit_capture_bps": 18.0
         },
         "toxic_flow_guard": {
             "enabled": true,
