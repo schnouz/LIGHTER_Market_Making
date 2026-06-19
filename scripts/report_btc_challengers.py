@@ -19,6 +19,7 @@ PROFILES = (
     "ultra_selective",
     "fast_reprice_guarded",
     "one_level_defensive",
+    "spread_quality_guarded",
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
