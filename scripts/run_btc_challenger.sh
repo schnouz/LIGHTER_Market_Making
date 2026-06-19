@@ -228,5 +228,5 @@ if [[ ! -f "$LOG_DIR/dry_run_state.json" ]]; then
   capital_args=(--capital "$CAPITAL")
 fi
 
-echo "Starting BTC challenger '$PROFILE' | log_dir=$LOG_DIR | config=$LIGHTER_MM_CONFIG | capital=$CAPITAL"
+echo "Starting ${MARKET_SYMBOL} challenger '$PROFILE' | log_dir=$LOG_DIR | config=$LIGHTER_MM_CONFIG | capital=$CAPITAL"
 exec "$ROOT/venv/bin/python" -u "$ROOT/market_maker_v2.py" --symbol "$MARKET_SYMBOL" "${capital_args[@]}"
