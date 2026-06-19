@@ -12,13 +12,8 @@ from statistics import mean
 
 
 PROFILES = (
-    "baseline_current",
-    "more_conservative",
-    "profit_tighter",
-    "trend_defensive",
     "ultra_selective",
     "fast_reprice_guarded",
-    "one_level_defensive",
     "spread_quality_guarded",
 )
 
