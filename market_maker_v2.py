@@ -190,6 +190,9 @@ MIN_ORDER_LIFETIME_SECONDS = float(os.getenv(
 MIN_REPRICE_IMPROVEMENT_BPS = float(os.getenv(
     "MIN_REPRICE_IMPROVEMENT_BPS",
     _execution_quality_cfg.get("min_reprice_improvement_bps", 0.0)))
+RISK_ADD_QUOTE_UPDATE_THRESHOLD_BPS = float(os.getenv(
+    "RISK_ADD_QUOTE_UPDATE_THRESHOLD_BPS",
+    _execution_quality_cfg.get("risk_add_quote_update_threshold_bps", 0.0)))
 RISK_ORDER_EXPOSURE_CAP_ENABLED = _env_bool(
     "RISK_ORDER_EXPOSURE_CAP_ENABLED",
     bool(_execution_quality_cfg.get("risk_order_exposure_cap_enabled", False)),
@@ -4239,6 +4242,11 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
             side = "buy" if is_buy else "sell"
             new_size = base_amount
             reduce_only = _is_reducing_side(side, state.account.position_size)
+            order_threshold = (
+                effective_threshold
+                if reduce_only
+                else max(effective_threshold, RISK_ADD_QUOTE_UPDATE_THRESHOLD_BPS)
+            )
 
             if new_price is None:
                 # Position limit suppressed this side — cancel any live order
@@ -4317,12 +4325,12 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                     continue
                 change_bps = price_change_bps(existing_price, new_price)
                 size_changed = _size_change_requires_update(existing_size, new_size)
-                needs_modify = existing_price is None or change_bps > effective_threshold or size_changed
+                needs_modify = existing_price is None or change_bps > order_threshold or size_changed
                 if not needs_modify:
                     if _log_debug:
                         logger.debug(
                             "Keeping %s[%d]: price %.2f bps <= %.2f and size unchanged",
-                            side, level, change_bps, effective_threshold,
+                            side, level, change_bps, order_threshold,
                         )
                     continue
                 if _should_hold_young_order(
@@ -4334,13 +4342,13 @@ def collect_order_operations(level_prices, base_amount, _log_debug=False):
                     new_size=new_size,
                     change_bps=change_bps,
                     size_changed=size_changed,
-                    effective_threshold=effective_threshold,
+                    effective_threshold=order_threshold,
                     reduce_only=reduce_only,
                 ):
                     if _log_debug:
                         logger.debug(
                             "Keeping %s[%d]: young order age %.2fs, change %.2f bps, threshold %.2f",
-                            side, level, _order_age_seconds(side, level) or 0.0, change_bps, effective_threshold,
+                            side, level, _order_age_seconds(side, level) or 0.0, change_bps, order_threshold,
                         )
                     continue
                 ops.append(BatchOp(

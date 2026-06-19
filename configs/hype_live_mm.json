@@ -7,13 +7,14 @@
         "capital_usage_percent": 0.08,
         "default_quote_update_threshold_bps": 18.0,
         "execution_quality": {
-            "min_order_lifetime_seconds": 6.0,
-            "min_reprice_improvement_bps": 4.0,
+            "min_order_lifetime_seconds": 45.0,
+            "min_reprice_improvement_bps": 12.0,
+            "risk_add_quote_update_threshold_bps": 105.0,
             "risk_order_exposure_cap_enabled": true,
             "risk_order_exposure_buffer": 0.92
         },
         "spread_factor_level1": 2.0,
-        "order_timeout_seconds": 30.0,
+        "order_timeout_seconds": 120.0,
         "position_value_threshold_usd": 12.0,
         "min_order_value_usd": 14.5,
         "maker_fee_rate": 0.0,
