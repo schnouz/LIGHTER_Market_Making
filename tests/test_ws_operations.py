@@ -599,10 +599,15 @@ class TestSignAndSendBatchErrors(unittest.IsolatedAsyncioTestCase):
             _tx_ws=None, _global_backoff_until=0.0, _last_send_time=0.0,
             current_bid_order_id=None,
         ):
-            await mm.sign_and_send_batch(client, [op])
+            with patch.object(mm, "_trigger_nonce_recovery_backoff") as mock_nonce_backoff:
+                with patch.object(mm, "_trigger_global_backoff") as mock_global_backoff:
+                    await mm.sign_and_send_batch(client, [op])
+                    mock_nonce_backoff.assert_called_once()
+                    mock_global_backoff.assert_not_called()
 
         # send was called (signing succeeded)
         self.assertEqual(len(client.send_tx_batch_calls), 1)
+        self.assertGreater(len(client.nonce_manager.refreshes), 0)
 
     async def test_batch_modify_op_signs_correctly(self):
         """Modify-action BatchOp calls sign_modify_order."""

@@ -212,6 +212,12 @@ STALE_ORDER_POLLER_INTERVAL_SEC = float(os.getenv(
 STALE_ORDER_DEBOUNCE_COUNT = int(os.getenv(
     "STALE_ORDER_DEBOUNCE_COUNT",
     _safety.get("stale_order_debounce_count", 2)))
+ACTIVE_ORDER_FETCH_FAILURE_DEBOUNCE_COUNT = int(os.getenv(
+    "ACTIVE_ORDER_FETCH_FAILURE_DEBOUNCE_COUNT",
+    _safety.get(
+        "active_order_fetch_failure_debounce_count",
+        max(4, STALE_ORDER_DEBOUNCE_COUNT + 2),
+    )))
 MAX_CONSECUTIVE_ORDER_REJECTIONS = int(os.getenv(
     "MAX_CONSECUTIVE_ORDER_REJECTIONS",
     _safety.get("max_consecutive_order_rejections", 5)))
@@ -1724,7 +1730,21 @@ def _is_transient_error(exc: Exception) -> bool:
     """Return True for rate-limit (429) and nonce errors that should NOT
     trigger the circuit breaker — just a temporary backoff."""
     msg = str(exc).lower()
-    return "429" in msg or "too many" in msg or ("not enough" in msg and "quota" in msg) or "invalid nonce" in msg
+    return (
+        "429" in msg
+        or "too many" in msg
+        or ("not enough" in msg and "quota" in msg)
+        or "invalid nonce" in msg
+    )
+
+
+def _is_nonce_error_text(text: str) -> bool:
+    return "nonce" in str(text).lower()
+
+
+def _is_nonce_error(exc: Exception) -> bool:
+    body = getattr(exc, "body", None) or getattr(exc, "reason", "")
+    return _is_nonce_error_text(f"{exc} {body}")
 
 # ---------------------------------------------------------------------------
 # Adaptive rate limiter: sliding-window token bucket
@@ -2593,12 +2613,18 @@ async def _fetch_account_active_orders(
         return orders
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _do_request), timeout=timeout)
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _do_request),
+            timeout=timeout + 1.0,
+        )
     except asyncio.TimeoutError:
-        logger.error("Active-orders fetch timed out after %.1fs", timeout)
+        logger.warning("Active-orders fetch timed out after %.1fs", timeout)
+        return None
+    except requests.Timeout as exc:
+        logger.warning("Active-orders fetch timed out: %s", exc)
         return None
     except (requests.RequestException, ValueError, KeyError, OSError) as exc:
-        logger.error(f"Active-orders fetch failed: {exc}")
+        logger.warning(f"Active-orders fetch failed: {exc}")
         return None
 
 
@@ -2695,6 +2721,15 @@ async def reconcile_orders_with_exchange(
         account_id=account_id,
     )
     if remote_orders is None:
+        if _account_orders_ws_connected.is_set() and _account_orders_ws_ready:
+            reason = f"{source}:fetch_failed_ws_healthy"
+            risk_controller.mark_reconcile(ok=True, reason=reason)
+            logger.warning(
+                "Active-orders REST fetch unavailable during %s, but account_orders WS is healthy; "
+                "preserving live quote state.",
+                source,
+            )
+            return True
         risk_controller.mark_reconcile(ok=False, reason=f"{source}:fetch_failed")
         return False
     ok, unknown_ids = _reconcile_local_orders_with_remote_orders(remote_orders, source=source)
@@ -2773,7 +2808,10 @@ async def stale_order_reconciler_loop(client, market_id: int, account_id: int) -
                 source="stale_poller",
             )
             await asyncio.sleep(0)  # yield to let hot-path callbacks run
-            if not ok and risk_controller.mismatch_streak >= max(1, STALE_ORDER_DEBOUNCE_COUNT):
+            debounce_count = STALE_ORDER_DEBOUNCE_COUNT
+            if "fetch_failed" in state.risk.last_reconcile_reason:
+                debounce_count = ACTIVE_ORDER_FETCH_FAILURE_DEBOUNCE_COUNT
+            if not ok and risk_controller.mismatch_streak >= max(1, debounce_count):
                 risk_controller.trigger_pause(
                     f"order reconciliation mismatch for {risk_controller.mismatch_streak} polls"
                 )
@@ -3725,6 +3763,19 @@ def _trigger_global_backoff():
                    duration, _global_backoff_consecutive)
 
 
+def _trigger_nonce_recovery_backoff(duration: float = 3.0) -> None:
+    """Short write cooldown after an invalid nonce.
+
+    Nonce drift is usually a local sequencing/reconnect issue, not a quota
+    violation. Keep the pause short and avoid escalating the 429 backoff ladder.
+    """
+    global _global_backoff_until, _consecutive_successes, _last_backoff_trigger_time
+    _consecutive_successes = 0
+    _last_backoff_trigger_time = time.monotonic()
+    _global_backoff_until = max(_global_backoff_until, time.monotonic() + max(0.0, duration))
+    logger.warning("Invalid nonce — refreshed nonce state; short write backoff for %.1fs", duration)
+
+
 def _reset_global_backoff():
     """After a successful write, require N consecutive successes before
     resetting escalation counter. Auto-resets after 5 minutes without a 429."""
@@ -4415,6 +4466,10 @@ async def _send_single_op_rest(client, tx_type: int, tx_info, op) -> bool:
             _update_volume_quota(0)
             client.nonce_manager.acknowledge_failure(API_KEY_INDEX)
             client.nonce_manager.hard_refresh_nonce(API_KEY_INDEX)
+        elif _is_nonce_error(e):
+            client.nonce_manager.acknowledge_failure(API_KEY_INDEX)
+            client.nonce_manager.hard_refresh_nonce(API_KEY_INDEX)
+            _trigger_nonce_recovery_backoff()
         elif _is_transient_error(e):
             _trigger_global_backoff()
             client.nonce_manager.acknowledge_failure(API_KEY_INDEX)
@@ -4652,13 +4707,17 @@ async def sign_and_send_batch(client, ops: list):
                 for aki in signed_nonces:
                     client.nonce_manager.acknowledge_failure(aki)
                 return
-            if "nonce" in err_lower:
+            if _is_nonce_error_text(err_msg):
                 logger.warning("Batch nonce error: %s; refreshing nonces", err_msg)
                 seen_keys = set()
                 for aki in signed_nonces:
+                    client.nonce_manager.acknowledge_failure(aki)
                     if aki not in seen_keys:
                         client.nonce_manager.hard_refresh_nonce(aki)
                         seen_keys.add(aki)
+                if not seen_keys:
+                    client.nonce_manager.hard_refresh_nonce(API_KEY_INDEX)
+                _trigger_nonce_recovery_backoff()
                 return
             logger.error("Batch send failed (%s): %s", send_method, err_msg)
             for aki in signed_nonces:
@@ -4685,6 +4744,16 @@ async def sign_and_send_batch(client, ops: list):
     except Exception as e:
         body = getattr(e, 'body', None) or getattr(e, 'reason', '')
         logger.error("Batch send_tx_batch exception: %s | body=%s", e, body, exc_info=True)
+        if _is_nonce_error(e):
+            for aki in signed_nonces:
+                client.nonce_manager.acknowledge_failure(aki)
+            seen_keys = set(signed_nonces)
+            for aki in seen_keys:
+                client.nonce_manager.hard_refresh_nonce(aki)
+            if not seen_keys:
+                client.nonce_manager.hard_refresh_nonce(API_KEY_INDEX)
+            _trigger_nonce_recovery_backoff()
+            return
         if _is_quota_error(e) or _is_transient_error(e):
             if _is_quota_error(e):
                 _update_volume_quota(0)

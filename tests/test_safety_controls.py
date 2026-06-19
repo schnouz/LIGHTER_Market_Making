@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import market_maker_v2 as mm
-from _helpers import DummyClient, temp_mm_attrs
+from _helpers import DummyClient, temp_event_state, temp_mm_attrs
 
 
 class TestSafetyControls(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +93,26 @@ class TestSafetyControls(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(ok)
             self.assertFalse(mm.state.risk.last_reconcile_ok)
             self.assertEqual(mm.state.risk.last_reconcile_reason, "unit:fetch_failed")
+        finally:
+            mm.state.risk = original_risk
+            mm.risk_controller = mm.RiskController(mm.state.risk)
+
+    async def test_reconcile_fetch_failure_is_nonfatal_when_account_orders_ws_healthy(self):
+        original_risk = mm.RiskState(**vars(mm.state.risk))
+        try:
+            with temp_mm_attrs(_account_orders_ws_ready=True):
+                with temp_event_state(mm._account_orders_ws_connected, True):
+                    with patch.object(mm, "_fetch_account_active_orders", return_value=None):
+                        ok = await mm.reconcile_orders_with_exchange(
+                            client=None,
+                            market_id=1,
+                            account_id=2,
+                            source="unit",
+                        )
+            self.assertTrue(ok)
+            self.assertTrue(mm.state.risk.last_reconcile_ok)
+            self.assertEqual(mm.state.risk.last_reconcile_reason, "unit:fetch_failed_ws_healthy")
+            self.assertEqual(mm.state.risk.mismatch_streak, 0)
         finally:
             mm.state.risk = original_risk
             mm.risk_controller = mm.RiskController(mm.state.risk)
