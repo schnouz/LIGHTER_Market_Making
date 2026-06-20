@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import mean
 
 
-PROFILES = ("spread_65", "spread_85", "spread_110")
+PROFILES = ("spread_35", "spread_45", "spread_55", "spread_65", "spread_85", "spread_110")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
