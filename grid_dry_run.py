@@ -1138,9 +1138,6 @@ class GridRunner:
         self._last_summary = self._start_time
 
         # Fetch market details
-        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
-        order_api = lighter.OrderApi(api_client)
-
         market_id, price_tick, amount_tick = await get_market_details_async(self._symbol)
         if market_id is None:
             logger.error("Could not retrieve market details for %s. Exiting.", self._symbol)
@@ -1156,6 +1153,8 @@ class GridRunner:
         )
 
         # Fetch exchange minimums
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+        order_api = lighter.OrderApi(api_client)
         try:
             order_books_resp = await order_api.order_books()
             for ob in order_books_resp.order_books:
@@ -1165,6 +1164,8 @@ class GridRunner:
                     break
         except Exception as exc:
             logger.warning("Could not fetch min order sizes: %s", exc)
+        finally:
+            await api_client.close()
 
         self._shared_market = MarketState(
             local_order_book={"bids": _BookSide(), "asks": _BookSide(), "initialized": False},
