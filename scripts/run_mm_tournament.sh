@@ -84,17 +84,20 @@ PY
     log_dir="$LOG_ROOT/$sym"
     nohup_log="$LOG_ROOT/${sym}_launcher.log"
     mkdir -p "$log_dir"
-    (
-      export MARKET_SYMBOL="$sym"
-      export LOG_DIR="$log_dir"
-      export GRID_CONFIG="$GRID_CONFIG"
-      export DURATION_SEC="$DURATION_SEC"
-      export CHECK_INTERVAL="$CHECK_INTERVAL"
-      export MAX_RESTARTS="$MAX_RESTARTS"
-      export PYTHON_BIN="$PYTHON_BIN"
+    nohup bash -c '
+      set -euo pipefail
+      export MARKET_SYMBOL="$1"
+      export LOG_DIR="$2"
+      export GRID_CONFIG="$3"
+      export DURATION_SEC="$4"
+      export CHECK_INTERVAL="$5"
+      export MAX_RESTARTS="$6"
+      export PYTHON_BIN="$7"
       export ALPHA_SOURCE="${ALPHA_SOURCE:-lighter}"
-      exec "$ROOT/run_grid_3d.sh"
-    ) > "$nohup_log" 2>&1 &
+      cd "$8"
+      exec bash "$8/run_grid_3d.sh"
+    ' _ "$sym" "$log_dir" "$GRID_CONFIG" "$DURATION_SEC" "$CHECK_INTERVAL" "$MAX_RESTARTS" "$PYTHON_BIN" "$ROOT" \
+      > "$nohup_log" 2>&1 &
     echo "$sym $! $log_dir" >> "$PID_FILE"
     echo "started $sym monitor_pid=$! log_dir=$log_dir"
     sleep 0.5
