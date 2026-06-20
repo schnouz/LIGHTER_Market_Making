@@ -182,6 +182,7 @@ def _param_key(p: GridParams) -> str:
             f"_kp{p.cj_kappa_plus or p.cj_kappa}_km{p.cj_kappa_minus or p.cj_kappa}"
             f"_ep{p.cj_epsilon_plus or p.cj_epsilon}_em{p.cj_epsilon_minus or p.cj_epsilon}"
             f"_a{p.cj_alpha}_ph{p.cj_phi}_sm{p.cj_spread_multiplier}_vs{p.cj_volatility_spread_multiplier}"
+            f"_minh{p.cj_min_half_spread_bps}_maxh{p.cj_max_half_spread_bps}"
             f"_ls{p.cj_lambda_scale}_ks{p.cj_kappa_scale}_es{p.cj_epsilon_scale}_ss{p.cj_sigma2_scale}"
             f"_c{p.capital_usage_percent}_l{p.num_levels}"
         )

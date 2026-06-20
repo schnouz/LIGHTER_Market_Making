@@ -65,6 +65,10 @@ def parse_param_key(pk: str) -> dict:
             params["spread_multiplier"] = value
         elif (value := parse_float_suffix(token, "vs")) is not None:
             params["volatility_spread_multiplier"] = value
+        elif (value := parse_float_suffix(token, "minh")) is not None:
+            params["cj_min_half_spread_bps"] = value
+        elif (value := parse_float_suffix(token, "maxh")) is not None:
+            params["cj_max_half_spread_bps"] = value
         elif (value := parse_float_suffix(token, "ls")) is not None:
             params["lambda_scale"] = value
         elif (value := parse_float_suffix(token, "ks")) is not None:
@@ -81,6 +85,11 @@ def parse_param_key(pk: str) -> dict:
             params["skew"] = value
         elif (value := parse_float_suffix(token, "f")) is not None:
             params["spread_factor"] = value
+        elif token.startswith("c1"):
+            if (value := parse_float_suffix(token, "c1")) is not None:
+                params["c1_ticks"] = value
+        elif (value := parse_float_suffix(token, "c")) is not None:
+            params["capital_usage_percent"] = value
         elif token.startswith("l") and token[1:].isdigit():
             params["num_levels"] = int(token[1:])
     return params
