@@ -34,10 +34,11 @@ def split_symbol_param(parts: str) -> tuple[str, str]:
     ``cj_...``.  Keeping this centralized prevents the result scanner from
     silently grouping CJ files under a fake symbol.
     """
-    for marker in ("_v", "_cj_"):
-        idx = parts.find(marker)
-        if idx >= 0:
-            return parts[:idx], parts[idx + 1:]
+    matches = [(parts.find(marker), marker) for marker in ("_cj_", "_v")]
+    matches = [(idx, marker) for idx, marker in matches if idx >= 0]
+    if matches:
+        idx, marker = min(matches, key=lambda item: item[0])
+        return parts[:idx], parts[idx + 1:]
     if "_" in parts:
         return parts.split("_", 1)
     return "?", parts
