@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize HYPE market-making dry-run challengers."""
+"""Summarize market-making dry-run challengers for one symbol."""
 
 from __future__ import annotations
 
@@ -11,12 +11,7 @@ from pathlib import Path
 from statistics import mean
 
 
-PROFILES = (
-    "spread_65",
-    "spread_85",
-    "spread_110",
-)
-
+PROFILES = ("spread_65", "spread_85", "spread_110")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -46,10 +41,10 @@ def _read_state(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def summarize_profile(root: Path, profile: str) -> dict:
+def summarize_profile(root: Path, symbol: str, profile: str) -> dict:
     log_dir = root / profile
     state = _read_state(log_dir / "dry_run_state.json")
-    trades = _read_trades(log_dir / "trades_HYPE.csv")
+    trades = _read_trades(log_dir / f"trades_{symbol}.csv")
 
     notionals = [_float(row.get("notional_usd")) for row in trades]
     spread_captures = [_float(row.get("spread_capture_bps")) for row in trades if row.get("spread_capture_bps")]
@@ -80,17 +75,15 @@ def summarize_profile(root: Path, profile: str) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summarize HYPE MM dry-run challengers")
-    parser.add_argument(
-        "--root",
-        default=str(PROJECT_ROOT / "logs" / "challengers_hype"),
-        help="Challenger log root",
-    )
+    parser = argparse.ArgumentParser(description="Summarize MM dry-run challengers")
+    parser.add_argument("--symbol", default="HYPE", help="Market symbol")
+    parser.add_argument("--root", help="Challenger log root")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of table")
     args = parser.parse_args()
 
-    root = Path(args.root)
-    rows = [summarize_profile(root, profile) for profile in PROFILES]
+    symbol = args.symbol.upper()
+    root = Path(args.root) if args.root else PROJECT_ROOT / "logs" / f"challengers_{symbol.lower()}"
+    rows = [summarize_profile(root, symbol, profile) for profile in PROFILES]
     if args.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
         return 0
