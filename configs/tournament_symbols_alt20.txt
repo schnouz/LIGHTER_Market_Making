@@ -1,0 +1,24 @@
+# Second-wave volatile/range alt universe for Lighter MM tournament.
+# Selected from active Lighter markets using 24h volume, trade count,
+# daily range, and current top-of-book spread.
+# Keep one symbol per line. Lines starting with # are ignored.
+EIGEN
+AXS
+MET
+JTO
+EDGE
+AERO
+AVAX
+XPL
+WLD
+NEAR
+ENA
+TAO
+ONDO
+TIA
+SUI
+FARTCOIN
+PUMP
+TRUMP
+POPCAT
+SPX
