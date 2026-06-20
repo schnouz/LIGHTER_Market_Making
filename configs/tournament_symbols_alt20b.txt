@@ -1,0 +1,23 @@
+# Third-wave volatile/range alt universe for Lighter MM tournament.
+# Selected from active Lighter markets after excluding CORE10 and ALT20.
+# Keep one symbol per line. Lines starting with # are ignored.
+GRAM
+XMR
+POL
+VVV
+XLM
+DASH
+XRP
+ADA
+AAVE
+UNI
+PENDLE
+AZTEC
+SEI
+APT
+MON
+LINK
+WLFI
+FIL
+1000PEPE
+1000SHIB
