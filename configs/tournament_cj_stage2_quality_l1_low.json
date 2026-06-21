@@ -27,7 +27,7 @@
     "cj_min_half_spread_bps": [3.0, 4.0, 5.0, 6.0],
     "cj_max_half_spread_bps": [25.0, 35.0, 45.0],
     "capital_usage_percent": [0.04, 0.06, 0.08, 0.10, 0.12],
-    "num_levels": [2]
+    "num_levels": [1]
   },
   "fixed": {
     "cj_use_estimator": true,
