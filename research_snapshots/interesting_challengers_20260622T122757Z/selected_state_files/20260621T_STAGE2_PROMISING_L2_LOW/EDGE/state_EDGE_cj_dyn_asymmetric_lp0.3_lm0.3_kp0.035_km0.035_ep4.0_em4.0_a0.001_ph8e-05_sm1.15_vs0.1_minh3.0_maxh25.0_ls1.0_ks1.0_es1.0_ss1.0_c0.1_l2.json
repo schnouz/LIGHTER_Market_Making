@@ -1,0 +1,54 @@
+{
+  "available_capital": 777.2385920000004,
+  "portfolio_value": 1010.2865725,
+  "position": 602.9000000000001,
+  "entry_vwap": 0.3853697834704378,
+  "realized_pnl": 9.578034454326916,
+  "fill_count": 42,
+  "total_volume": 3670.626564000001,
+  "initial_capital": 1000.0,
+  "initial_portfolio_value": 1000.0,
+  "started_at": "2026-06-21T11:07:09.904720+00:00",
+  "maker_fill_count": 42,
+  "taker_fill_count": 0,
+  "spread_capture_bps_avg": -11.038408275304485,
+  "markout_bps_avg": {
+    "1.0": -5.120355474512813,
+    "5.0": -4.639004243394269,
+    "30.0": -6.026823080809188
+  },
+  "adverse_markout_bps_avg": {
+    "1.0": 6.804000135289021,
+    "5.0": 7.345395874631934,
+    "30.0": 12.359006921505667
+  },
+  "markout_sum_bps": {
+    "1.0": -215.05492992953816,
+    "5.0": -194.8381782225593,
+    "30.0": -253.1265693939859
+  },
+  "markout_adverse_sum_bps": {
+    "1.0": 285.7680056821389,
+    "5.0": 308.5066267345412,
+    "30.0": 519.078290703238
+  },
+  "markout_counts": {
+    "1.0": 42,
+    "5.0": 42,
+    "30.0": 42
+  },
+  "inventory_abs_usd_seconds": 12030306.105611091,
+  "inventory_boundary_seconds": 0.0,
+  "inventory_sample_seconds": 80734.64002480684,
+  "inventory_max_usd_seen": 276.8419155,
+  "inventory_boundary_usd": 419.6716146000003,
+  "inventory_boundary_ratio": 0.0,
+  "cj_estimator_ready": false,
+  "cj_kappa_fit_quality": 0.0,
+  "cj_kappa_r2_plus": 0.0,
+  "cj_kappa_r2_minus": 0.0,
+  "cj_kappa_points_plus": 3,
+  "cj_kappa_points_minus": 3,
+  "cj_estimated_sigma2_per_sec": 9.24e-08,
+  "updated_at": "2026-06-22T12:29:12.725311+00:00"
+}

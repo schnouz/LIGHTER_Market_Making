@@ -1,0 +1,12 @@
+# First-wave Lighter MM tournament universe.
+# Keep one symbol per line. Lines starting with # are ignored.
+HYPE
+LIT
+BTC
+ETH
+SOL
+DOGE
+JUP
+ASTER
+GMX
+ZEC
