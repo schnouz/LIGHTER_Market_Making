@@ -92,7 +92,7 @@
         "quote_engine": "cartea_jaimungal",
         "cartea_jaimungal": {
             "use_estimator": true,
-            "require_estimator_ready": true,
+            "require_estimator_ready": false,
             "estimator_blend": 1.0,
             "lambda": 0.3,
             "kappa": 0.035,
