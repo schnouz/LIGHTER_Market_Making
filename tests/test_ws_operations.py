@@ -1677,6 +1677,85 @@ class TestAccountOrdersSnapshot(unittest.TestCase):
 
             self.assertEqual(levels, [(99.0, 101.0)])
 
+    def test_toxic_flow_hard_side_gate_suppresses_toxic_buy_while_flat(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            TOXIC_FLOW_HARD_SIDE_GATE_ENABLED=True,
+            TOXIC_FLOW_HARD_SIDE_MIN_SAMPLES=3,
+            TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS=8.0,
+            TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS=4.0,
+            TOXIC_FLOW_HARD_SIDE_COOLDOWN_SECONDS=0.0,
+            _toxic_flow_hard_side_suppress_until={"buy": 0.0, "sell": 0.0},
+        ):
+            levels = mm._apply_toxic_flow_hard_side_gate(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=0.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    buy_adverse_bps=12.0,
+                    buy_markout_bps=-9.0,
+                    buy_sample_count=5,
+                    sell_adverse_bps=1.0,
+                    sell_markout_bps=0.5,
+                    sell_sample_count=5,
+                ),
+            )
+
+            self.assertEqual(levels[0][0], None)
+            self.assertEqual(levels[1][0], None)
+            self.assertIsNotNone(levels[0][1])
+
+    def test_toxic_flow_hard_side_gate_preserves_reducing_buy_for_short(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            TOXIC_FLOW_HARD_SIDE_GATE_ENABLED=True,
+            TOXIC_FLOW_HARD_SIDE_MIN_SAMPLES=3,
+            TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS=8.0,
+            TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS=4.0,
+            TOXIC_FLOW_HARD_SIDE_COOLDOWN_SECONDS=0.0,
+            _toxic_flow_hard_side_suppress_until={"buy": 0.0, "sell": 0.0},
+        ):
+            levels = mm._apply_toxic_flow_hard_side_gate(
+                [(99.0, 101.0)],
+                mid_price=100.0,
+                position_size=-1.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    buy_adverse_bps=12.0,
+                    buy_markout_bps=-9.0,
+                    buy_sample_count=5,
+                ),
+            )
+
+            self.assertEqual(levels, [(99.0, 101.0)])
+
+    def test_toxic_flow_hard_side_gate_suppresses_toxic_sell_for_short(self):
+        with temp_mm_attrs(
+            MARKET_ID=1,
+            _PRICE_TICK_FLOAT=0.1,
+            TOXIC_FLOW_HARD_SIDE_GATE_ENABLED=True,
+            TOXIC_FLOW_HARD_SIDE_MIN_SAMPLES=2,
+            TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS=8.0,
+            TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS=4.0,
+            TOXIC_FLOW_HARD_SIDE_COOLDOWN_SECONDS=0.0,
+            _toxic_flow_hard_side_suppress_until={"buy": 0.0, "sell": 0.0},
+        ):
+            levels = mm._apply_toxic_flow_hard_side_gate(
+                [(99.0, 101.0), (98.0, 102.0)],
+                mid_price=100.0,
+                position_size=-1.0,
+                quality_adjustment=mm.QualityAdjustment(
+                    sell_adverse_bps=19.0,
+                    sell_markout_bps=-17.0,
+                    sell_sample_count=2,
+                ),
+            )
+
+            self.assertIsNotNone(levels[0][0])
+            self.assertEqual(levels[0][1], None)
+            self.assertEqual(levels[1][1], None)
+
     def test_adverse_trend_guard_suppresses_buy_risk_in_downtrend(self):
         with temp_mm_attrs(
             MARKET_ID=1,

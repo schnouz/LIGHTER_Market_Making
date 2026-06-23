@@ -372,6 +372,22 @@ TOXIC_FLOW_GUARD_CONFIG = ToxicFlowGuardConfig(
         "TOXIC_FLOW_SUPPRESS_ON_WEAK_SPREAD_ADVERSE",
         bool(_toxic_flow_cfg.get("suppress_on_weak_spread_adverse", False))),
 )
+TOXIC_FLOW_HARD_SIDE_GATE_ENABLED = _env_bool(
+    "TOXIC_FLOW_HARD_SIDE_GATE_ENABLED",
+    bool(_toxic_flow_cfg.get("hard_side_gate_enabled", False)),
+)
+TOXIC_FLOW_HARD_SIDE_MIN_SAMPLES = int(os.getenv(
+    "TOXIC_FLOW_HARD_SIDE_MIN_SAMPLES",
+    _toxic_flow_cfg.get("hard_side_min_samples", 4)))
+TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS = float(os.getenv(
+    "TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS",
+    _toxic_flow_cfg.get("hard_side_adverse_bps", 8.0)))
+TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS = float(os.getenv(
+    "TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS",
+    _toxic_flow_cfg.get("hard_side_markout_loss_bps", 4.0)))
+TOXIC_FLOW_HARD_SIDE_COOLDOWN_SECONDS = float(os.getenv(
+    "TOXIC_FLOW_HARD_SIDE_COOLDOWN_SECONDS",
+    _toxic_flow_cfg.get("hard_side_cooldown_seconds", 300.0)))
 
 _adverse_trend_cfg = _trading.get("adverse_trend_guard", {})
 ADVERSE_TREND_GUARD_ENABLED = _env_bool(
@@ -811,6 +827,7 @@ _last_inventory_hysteresis_log = 0.0
 _last_inventory_derisk_log = 0.0
 _last_toxic_flow_guard_log = 0.0
 _last_adverse_trend_guard_log = 0.0
+_toxic_flow_hard_side_suppress_until = {"buy": 0.0, "sell": 0.0}
 _adverse_trend_suppress_until = {"buy": 0.0, "sell": 0.0}
 _last_flat_quote_fallback_log = 0.0
 _last_execution_quality_guard_log = 0.0
@@ -4973,6 +4990,91 @@ def _side_would_increase_exposure(side: str, position_size: float) -> bool:
     return False
 
 
+def _apply_toxic_flow_hard_side_gate(
+    level_prices,
+    mid_price: float,
+    position_size: float,
+    quality_adjustment: QualityAdjustment,
+):
+    """Hard-stop sides with proven toxic post-fill markouts.
+
+    The softer toxic-flow guard widens quotes and only suppresses the side
+    that increases an already meaningful inventory.  That is not enough when a
+    flat strategy is repeatedly selected against.  This opt-in guard can stop
+    opening fresh exposure on a side even while flat, while preserving
+    reduce-only exits for existing inventory.
+    """
+    global _last_toxic_flow_guard_log
+
+    if not TOXIC_FLOW_HARD_SIDE_GATE_ENABLED or mid_price <= 0:
+        return level_prices
+
+    min_samples = max(TOXIC_FLOW_HARD_SIDE_MIN_SAMPLES, 1)
+    buy_toxic = (
+        quality_adjustment.buy_sample_count >= min_samples
+        and (
+            quality_adjustment.buy_adverse_bps >= TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS
+            or quality_adjustment.buy_markout_bps <= -TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS
+        )
+    )
+    sell_toxic = (
+        quality_adjustment.sell_sample_count >= min_samples
+        and (
+            quality_adjustment.sell_adverse_bps >= TOXIC_FLOW_HARD_SIDE_ADVERSE_BPS
+            or quality_adjustment.sell_markout_bps <= -TOXIC_FLOW_HARD_SIDE_MARKOUT_LOSS_BPS
+        )
+    )
+
+    now = time.monotonic()
+    cooldown = max(TOXIC_FLOW_HARD_SIDE_COOLDOWN_SECONDS, 0.0)
+    if buy_toxic:
+        _toxic_flow_hard_side_suppress_until["buy"] = max(
+            _toxic_flow_hard_side_suppress_until.get("buy", 0.0),
+            now + cooldown,
+        )
+    if sell_toxic:
+        _toxic_flow_hard_side_suppress_until["sell"] = max(
+            _toxic_flow_hard_side_suppress_until.get("sell", 0.0),
+            now + cooldown,
+        )
+
+    suppress_buy = (
+        buy_toxic
+        or now < _toxic_flow_hard_side_suppress_until.get("buy", 0.0)
+    ) and _side_would_increase_exposure("buy", position_size)
+    suppress_sell = (
+        sell_toxic
+        or now < _toxic_flow_hard_side_suppress_until.get("sell", 0.0)
+    ) and _side_would_increase_exposure("sell", position_size)
+    if not suppress_buy and not suppress_sell:
+        return level_prices
+
+    if now - _last_toxic_flow_guard_log >= 60.0:
+        logger.warning(
+            "Toxic hard side gate active: suppress_buy=%s suppress_sell=%s "
+            "buy_adv=%.2fbps sell_adv=%.2fbps buy_markout=%.2fbps sell_markout=%.2fbps "
+            "samples=%d/%d cooldown=%.0fs",
+            suppress_buy,
+            suppress_sell,
+            quality_adjustment.buy_adverse_bps,
+            quality_adjustment.sell_adverse_bps,
+            quality_adjustment.buy_markout_bps,
+            quality_adjustment.sell_markout_bps,
+            quality_adjustment.buy_sample_count,
+            quality_adjustment.sell_sample_count,
+            cooldown,
+        )
+        _last_toxic_flow_guard_log = now
+
+    adjusted = []
+    for bid, ask in level_prices:
+        adjusted.append((None if suppress_buy else bid, None if suppress_sell else ask))
+
+    if all(bid is None and ask is None for bid, ask in adjusted) and abs(position_size) >= EPSILON:
+        return _fallback_reduce_only_quote_levels(mid_price, position_size)
+    return adjusted
+
+
 def _apply_adverse_trend_guard(
     level_prices,
     mid_price: float,
@@ -5738,6 +5840,12 @@ async def market_making_loop(client):
                 snap_mid,
                 snap_position,
                 _max_pos,
+                quality_adjustment,
+            )
+            level_prices = _apply_toxic_flow_hard_side_gate(
+                level_prices,
+                snap_mid,
+                snap_position,
                 quality_adjustment,
             )
             level_prices = _apply_adverse_trend_guard(

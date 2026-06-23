@@ -84,6 +84,7 @@ def temp_mm_attrs(**overrides):
     mm._last_inventory_hysteresis_log = 0.0
     mm._last_inventory_derisk_log = 0.0
     mm._last_toxic_flow_guard_log = 0.0
+    mm._toxic_flow_hard_side_suppress_until = {"buy": 0.0, "sell": 0.0}
     mm._last_flat_quote_fallback_log = 0.0
     mm._last_execution_quality_guard_log = 0.0
     # Save/restore local_order_book by replacing with a fresh empty book on teardown.
@@ -144,6 +145,7 @@ def temp_mm_attrs(**overrides):
         mm._last_inventory_hysteresis_log = 0.0
         mm._last_inventory_derisk_log = 0.0
         mm._last_toxic_flow_guard_log = 0.0
+        mm._toxic_flow_hard_side_suppress_until = {"buy": 0.0, "sell": 0.0}
         mm._last_flat_quote_fallback_log = 0.0
         mm._last_execution_quality_guard_log = 0.0
         # Restore original if it was replaced, or reset to fresh empty book
