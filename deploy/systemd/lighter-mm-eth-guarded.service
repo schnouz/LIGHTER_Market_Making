@@ -12,6 +12,7 @@ EnvironmentFile=/home/ubuntu/LIGHTER_Market_Making/.env.edge
 Environment=LIGHTER_MM_ROOT=/home/ubuntu/LIGHTER_Market_Making
 Environment=MARKET_SYMBOL=ETH
 Environment=LIGHTER_MM_CONFIG=/home/ubuntu/LIGHTER_Market_Making/configs/eth_guarded_live_mm.json
+Environment=LOG_DIR=/home/ubuntu/LIGHTER_Market_Making/logs/eth_guarded
 ExecStart=/home/ubuntu/LIGHTER_Market_Making/run_eth_guarded_live.sh
 Restart=always
 RestartSec=10
