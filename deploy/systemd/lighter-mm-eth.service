@@ -8,7 +8,7 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/LIGHTER_Market_Making
-EnvironmentFile=/home/ubuntu/LIGHTER_Market_Making/.env.eth
+EnvironmentFile=/home/ubuntu/LIGHTER_Market_Making/.env
 Environment=LIGHTER_MM_ROOT=/home/ubuntu/LIGHTER_Market_Making
 Environment=MARKET_SYMBOL=ETH
 Environment=LIGHTER_MM_CONFIG=/home/ubuntu/LIGHTER_Market_Making/configs/eth_live_mm.json
